@@ -14,12 +14,13 @@ export async function gitChangedFiles(repositoryRoot: string): Promise<string[]>
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index]!;
     const status = entry.slice(0, 2);
-    let path = entry.slice(3);
-    if ((status.includes("R") || status.includes("C")) && entries[index + 1]) {
-      path = entries[index + 1]!;
-      index += 1;
-    }
+    const path = entry.slice(3);
     files.push(normalizePath(path));
+    if ((status.includes("R") || status.includes("C")) && entries[index + 1]) {
+      const sourcePath = entries[index + 1]!;
+      index += 1;
+      if (status.includes("R")) files.push(normalizePath(sourcePath));
+    }
   }
   return [...new Set(files)].sort();
 }

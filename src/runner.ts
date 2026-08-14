@@ -166,7 +166,7 @@ export class GraphRunner {
     const requiresAgentHandoff =
       ["agent", "review"].includes(outcome.node.type) ||
       (outcome.node.type === "external_action" && outcome.node.executor !== "shell");
-    const handoffFailure = requiresAgentHandoff && outcome.adapterResult?.handoff.status !== "complete"
+    const handoffFailure = requiresAgentHandoff && !outcome.error && outcome.adapterResult?.handoff.status !== "complete"
       ? `agent status ${outcome.adapterResult?.handoff.status ?? "missing"}`
       : undefined;
     const failures = [

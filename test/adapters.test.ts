@@ -77,3 +77,53 @@ test("Claude adapter retains raw output when structured output is invalid", asyn
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Claude adapter surfaces a concise provider result on a nonzero exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-adapter-auth-"));
+  const fake = join(root, "auth-error.mjs");
+  await writeFile(
+    fake,
+    `process.stdout.write(JSON.stringify({ type: "result", is_error: true, result: "Failed to authenticate: OAuth expired" })); process.exit(1);`,
+    "utf8",
+  );
+
+  try {
+    const claude = new ClaudeAdapter(process.execPath, [fake]);
+    await assert.rejects(
+      claude.execute({
+        node: { ...node, executor: "claude" },
+        repositoryRoot: root,
+        prompt: "test prompt",
+        artifactsDirectory: root,
+        timeoutMs: 10_000,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === "Claude exited 1: Failed to authenticate: OAuth expired",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex adapter reports an agent-process timeout explicitly", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-adapter-timeout-"));
+  const fake = join(root, "slow-agent.mjs");
+  await writeFile(fake, `setTimeout(() => {}, 60_000);`, "utf8");
+
+  try {
+    const codex = new CodexAdapter(process.execPath, [fake]);
+    await assert.rejects(
+      codex.execute({
+        node,
+        repositoryRoot: root,
+        prompt: "test prompt",
+        artifactsDirectory: root,
+        timeoutMs: 50,
+      }),
+      /Codex timed out after 50ms/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

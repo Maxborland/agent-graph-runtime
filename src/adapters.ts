@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { extname, join } from "node:path";
 
 import type {
   AdapterRequest,
@@ -117,6 +117,8 @@ interface ProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  timedOut: boolean;
+  timeoutMs: number;
 }
 
 async function runProcess(
@@ -126,10 +128,16 @@ async function runProcess(
   cwd: string,
   timeoutMs: number,
 ): Promise<ProcessResult> {
+  const resolved = await resolveSpawnCommand(command, args);
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, shell: false, windowsHide: true });
+    const child = spawn(resolved.command, resolved.args, {
+      cwd,
+      shell: false,
+      windowsHide: true,
+    });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const append = (current: string, chunk: Buffer): string =>
       `${current}${chunk.toString("utf8")}`.slice(-1_000_000);
     child.stdout.on("data", (chunk: Buffer) => {
@@ -140,14 +148,60 @@ async function runProcess(
     });
     child.on("error", reject);
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill();
     }, timeoutMs);
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode: code ?? 1 });
+      resolve({ stdout, stderr, exitCode: code ?? 1, timedOut, timeoutMs });
     });
     child.stdin.end(input);
   });
+}
+
+export async function resolveSpawnCommand(
+  command: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Promise<{ command: string; args: string[] }> {
+  if (platform !== "win32") return { command, args };
+
+  let resolved = command;
+  if (!command.includes("/") && !command.includes("\\") && extname(command) === "") {
+    const pathValue = getEnvironmentValue(environment, "PATH") ?? "";
+    const directories = pathValue.split(";").map((entry) => entry.replace(/^"|"$/g, ""));
+    const extensions = [".exe", ".com", ".cmd", ".bat"];
+    outer: for (const directory of directories) {
+      if (!directory) continue;
+      for (const extension of extensions) {
+        const candidate = join(directory, `${command}${extension}`);
+        try {
+          await access(candidate);
+          resolved = candidate;
+          break outer;
+        } catch {
+          // Continue searching the configured PATH.
+        }
+      }
+    }
+  }
+
+  if (/\.(cmd|bat)$/i.test(resolved)) {
+    return {
+      command: getEnvironmentValue(environment, "ComSpec") ?? "cmd.exe",
+      args: ["/d", "/s", "/c", resolved, ...args],
+    };
+  }
+  return { command: resolved, args };
+}
+
+function getEnvironmentValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+): string | undefined {
+  const key = Object.keys(environment).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key ? environment[key] : undefined;
 }
 
 function parseHandoff(raw: string): AgentHandoff {
@@ -193,6 +247,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function processFailure(provider: string, result: ProcessResult): Error {
-  const detail = result.stderr.trim() || result.stdout.trim() || "no output";
+  if (result.timedOut) return new Error(`${provider} timed out after ${result.timeoutMs}ms`);
+  const detail =
+    result.stderr.trim() || providerResultDetail(result.stdout) || result.stdout.trim() || "no output";
   return new Error(`${provider} exited ${result.exitCode}: ${detail.slice(-2_000)}`);
+}
+
+function providerResultDetail(stdout: string): string | undefined {
+  try {
+    const parsed = JSON.parse(stdout) as unknown;
+    return isRecord(parsed) && typeof parsed.result === "string" ? parsed.result : undefined;
+  } catch {
+    return undefined;
+  }
 }

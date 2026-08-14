@@ -35,3 +35,21 @@ test("ownership reports only new changed paths outside declared patterns", async
   }
 });
 
+test("ownership detects a rename from an owned path to an unowned path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-rename-"));
+  try {
+    await exec("git", ["init", "--quiet"], { cwd: root });
+    await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    await exec("git", ["config", "user.name", "Test"], { cwd: root });
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src", "owned.ts"), "export {};\n");
+    await exec("git", ["add", "."], { cwd: root });
+    await exec("git", ["commit", "--quiet", "-m", "initial"], { cwd: root });
+
+    await exec("git", ["mv", "src/owned.ts", "escaped.ts"], { cwd: root });
+
+    assert.deepEqual(await findUnexpectedChanges(root, [], ["src/**"]), ["escaped.ts"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
