@@ -71,13 +71,19 @@ export class CodexAdapter implements AgentAdapter {
   }
 }
 
-export class ClaudeAdapter implements AgentAdapter {
+class ClaudeProtocolAdapter implements AgentAdapter {
   constructor(
     private readonly command = "claude",
     private readonly prefixArguments: string[] = [],
+    private readonly providerLabel = "Claude",
+    private readonly artifactStem = "claude",
+    private readonly allowModelOverride = true,
   ) {}
 
   async execute(request: AdapterRequest): Promise<AdapterResult> {
+    if (!this.allowModelOverride && request.node.model) {
+      throw new Error(`${this.providerLabel} nodes cannot override the launcher model`);
+    }
     await mkdir(request.artifactsDirectory, { recursive: true });
     const readOnly = request.node.type === "review";
     const tools = readOnly ? "Read,Glob,Grep,Bash" : "Read,Edit,Write,Glob,Grep,Bash";
@@ -103,13 +109,25 @@ export class ClaudeAdapter implements AgentAdapter {
       request.timeoutMs,
     );
     await Promise.all([
-      writeFile(join(request.artifactsDirectory, `${request.node.id}.claude.stdout.json`), processResult.stdout, "utf8"),
-      writeFile(join(request.artifactsDirectory, `${request.node.id}.claude.stderr.txt`), processResult.stderr, "utf8"),
+      writeFile(join(request.artifactsDirectory, `${request.node.id}.${this.artifactStem}.stdout.json`), processResult.stdout, "utf8"),
+      writeFile(join(request.artifactsDirectory, `${request.node.id}.${this.artifactStem}.stderr.txt`), processResult.stderr, "utf8"),
     ]);
-    if (processResult.exitCode !== 0) throw processFailure("Claude", processResult);
+    if (processResult.exitCode !== 0) throw processFailure(this.providerLabel, processResult);
     const parsed = JSON.parse(processResult.stdout) as unknown;
     const candidate = findStructuredOutput(parsed);
     return { ...processResult, handoff: validateHandoff(candidate) };
+  }
+}
+
+export class ClaudeAdapter extends ClaudeProtocolAdapter {
+  constructor(command = "claude", prefixArguments: string[] = []) {
+    super(command, prefixArguments, "Claude", "claude", true);
+  }
+}
+
+export class ClaudexAdapter extends ClaudeProtocolAdapter {
+  constructor(command = "claudex", prefixArguments: string[] = []) {
+    super(command, prefixArguments, "Claudex", "claudex", false);
   }
 }
 
@@ -171,7 +189,7 @@ export async function resolveSpawnCommand(
   if (!command.includes("/") && !command.includes("\\") && extname(command) === "") {
     const pathValue = getEnvironmentValue(environment, "PATH") ?? "";
     const directories = pathValue.split(";").map((entry) => entry.replace(/^"|"$/g, ""));
-    const extensions = [".exe", ".com", ".cmd", ".bat"];
+    const extensions = [".exe", ".com", ".cmd", ".bat", ".ps1"];
     outer: for (const directory of directories) {
       if (!directory) continue;
       for (const extension of extensions) {
@@ -191,6 +209,12 @@ export async function resolveSpawnCommand(
     return {
       command: getEnvironmentValue(environment, "ComSpec") ?? "cmd.exe",
       args: ["/d", "/s", "/c", resolved, ...args],
+    };
+  }
+  if (/\.ps1$/i.test(resolved)) {
+    return {
+      command: "pwsh.exe",
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", resolved, ...args],
     };
   }
   return { command: resolved, args };

@@ -11,12 +11,13 @@ import { selectReadyNodes } from "./state.js";
 import { RunStore } from "./store.js";
 import type {
   AdapterResult,
+  ExecutorName,
   GraphDefinition,
   GraphNodeDefinition,
   RunState,
 } from "./types.js";
 
-type AgentAdapters = Partial<Record<"codex" | "claude", AgentAdapter>>;
+type AgentAdapters = Partial<Record<Exclude<ExecutorName, "shell">, AgentAdapter>>;
 
 interface NodeOutcome {
   node: GraphNodeDefinition;

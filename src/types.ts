@@ -1,4 +1,5 @@
-export type ExecutorName = "codex" | "claude" | "shell";
+export const executorNames = ["codex", "claude", "claudex", "shell"] as const;
+export type ExecutorName = (typeof executorNames)[number];
 export type NodeType =
   | "agent"
   | "verify"

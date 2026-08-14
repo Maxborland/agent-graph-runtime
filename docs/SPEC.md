@@ -3,7 +3,7 @@
 ## Goal
 
 Provide a local, resumable graph runtime that executes repository work through
-the installed Codex CLI and Claude Code CLI, while keeping dependencies,
+the installed Codex CLI, native Claude Code CLI, or proxy-routed Claudex launcher, while keeping dependencies,
 ownership, evidence, verification, and human authorization outside agent
 conversation state.
 
@@ -21,6 +21,8 @@ changed files, and deterministic checks.
 - No cross-worktree merge automation in v1; one run owns one repository checkout.
 - No claim that CodeGraph context, agent handoffs, or model review prove correctness.
 - No bypass of Codex or Claude permission systems.
+- No modification of the user-owned Claudex launcher, proxy configuration,
+  model routing, effort, authentication, or context-window settings.
 
 ## Public interfaces
 
@@ -46,9 +48,11 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 - **AC2 Readiness:** A node starts only after all dependencies are accepted.
   Ready nodes with non-overlapping ownership may run concurrently up to the
   configured limit.
-- **AC3 Real adapters:** Agent nodes invoke `codex exec` or `claude -p` in the
-  graph repository. Both receive a structured-output schema and least-privilege
-  mode: implementation is workspace-scoped; review is read-only.
+- **AC3 Real adapters:** Agent nodes invoke `codex exec`, native `claude -p`, or
+  the installed `claudex` launcher in the graph repository. All receive a
+  structured-output schema and least-privilege mode: implementation is
+  workspace-scoped; review is read-only. `claude` and `claudex` remain distinct
+  executor identities with separate evidence artifacts and failure messages.
 - **AC4 Structured handoff:** An agent process is successful only when it exits
   zero and returns a valid handoff with `status`, `summary`, `changedFiles`,
   `verification`, and `gaps`. Agent claims alone never accept a node.
@@ -80,11 +84,18 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 - **AC12 Final status:** A run is complete only when every required node is
   accepted. The final report distinguishes completed, failed, blocked,
   awaiting-approval, and unverified states.
+- **AC13 Claudex launcher authority:** On Windows, a PATH-resolved `claudex.ps1`
+  is invoked explicitly through non-interactive PowerShell 7 so JSON arguments
+  survive the launcher-to-native-CLI boundary. Graph nodes cannot
+  override its model because the launcher owns Sol/Luna routing, effort, proxy
+  authentication, compaction, and the 262144-token context contract.
 
 ## Failure behavior and edge cases
 
 - Executor binary missing: fail the node with an actionable error; do not try a
   different provider.
+- Claudex launcher missing or proxy authentication invalid: fail only the
+  Claudex node; never fall back to native Claude or Codex.
 - Invalid or truncated JSON output: fail the attempt and retain raw output.
 - Check timeout: terminate the child process, mark the check failed, retain
   bounded stdout/stderr.
@@ -102,7 +113,11 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 ## Assumptions
 
 - Node.js 22+ and Git are installed.
+- PowerShell 7 (`pwsh`) is installed when a Windows `.ps1` Claudex launcher is used.
 - Codex/Claude authentication is already configured by the user.
+- Claudex, when selected, is already configured by the user and available on
+  PATH. The runtime forwards supported Claude Code print-mode arguments but
+  does not own or rewrite launcher-scoped model/environment settings.
 - The repository is trusted and each run uses a dedicated checkout when the
   surrounding product requires isolation.
 - Shell checks are authored by the graph owner and therefore are trusted local
@@ -113,8 +128,8 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 - AC1 → `validate rejects malformed and cyclic graphs`; `validate rejects
   overlapping parallel ownership`.
 - AC2 → `scheduler only returns dependency-ready non-overlapping nodes`.
-- AC3/AC4 → adapter contract tests using fake `codex` and `claude` executables;
-  optional installed-CLI smoke with read-only fixture.
+- AC3/AC4 → adapter contract tests using fake `codex`, `claude`, and `claudex`
+  executables; optional installed-CLI smoke with read-only fixture.
 - AC5 → `node fails when new Git paths escape ownership`.
 - AC6 → `checks gate acceptance and persist bounded evidence`.
 - AC7 → `interrupted run resumes without repeating accepted nodes`.
@@ -124,3 +139,6 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 - AC10 → `CodeGraph unavailable returns labeled fallback`.
 - AC11 → skill validation and project/user installer tests.
 - AC12 → CLI integration fixture covering complete, failed, and awaiting states.
+- AC13 → graph validation rejects `model` on Claudex nodes; Windows command
+  resolution wraps `.ps1` through non-interactive PowerShell; real read-only
+  Claudex smoke preserves launcher-owned routing.

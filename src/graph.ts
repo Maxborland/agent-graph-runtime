@@ -3,6 +3,7 @@ import type {
   GraphNodeDefinition,
   GraphValidationResult,
 } from "./types.js";
+import { executorNames } from "./types.js";
 
 const nodeTypes = new Set([
   "agent",
@@ -11,7 +12,7 @@ const nodeTypes = new Set([
   "human_gate",
   "external_action",
 ]);
-const executors = new Set(["codex", "claude", "shell"]);
+const executors = new Set<string>(executorNames);
 
 export function validateGraph(graph: GraphDefinition): GraphValidationResult {
   const errors: string[] = [];
@@ -40,6 +41,9 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
     }
     if (["agent", "review"].includes(node.type) && !node.prompt?.trim()) {
       errors.push(`node "${node.id}" requires a prompt`);
+    }
+    if (node.executor === "claudex" && node.model) {
+      errors.push(`Claudex node "${node.id}" cannot override the launcher model`);
     }
     if (
       node.type === "review" &&

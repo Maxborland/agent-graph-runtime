@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ClaudeAdapter, CodexAdapter } from "./adapters.js";
+import { ClaudeAdapter, ClaudexAdapter, CodexAdapter } from "./adapters.js";
 import { approveGate } from "./approval.js";
 import { validateGraph } from "./graph.js";
 import { retryNode } from "./invalidation.js";
@@ -20,7 +20,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (["--version", "-V"].includes(command)) {
-    console.log("0.1.0");
+    console.log("0.2.0");
     return;
   }
 
@@ -38,6 +38,7 @@ async function main(args: string[]): Promise<void> {
     const runner = new GraphRunner(graph, repositoryRoot, {
       codex: new CodexAdapter(),
       claude: new ClaudeAdapter(),
+      claudex: new ClaudexAdapter(),
     });
     const state = await runner.run();
     printState(state);

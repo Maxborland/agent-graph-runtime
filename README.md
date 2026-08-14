@@ -1,15 +1,17 @@
 # Agent Graph Runtime
 
 `agr` is a local, resumable task-graph runtime that invokes the installed Codex
-CLI and Claude Code CLI. The graph, not either model's conversation, owns
+CLI, native Claude Code CLI, or proxy-routed Claudex launcher. The graph, not
+any model's conversation, owns
 dependencies, retries, path ownership, checks, evidence, and human approvals.
 
-Current status: working local v0.1.0, not published to npm.
+Current status: working local v0.2.0, not published to npm.
 
 ## Requirements
 
 - Node.js 22+, Git, and pnpm
-- authenticated `codex` and/or `claude` CLIs on `PATH`
+- PowerShell 7 (`pwsh`) when using a Windows `claudex.ps1` launcher
+- authenticated `codex`, native `claude`, and/or configured `claudex` on `PATH`
 - a trusted Git checkout; shell checks in a graph execute as local commands
 
 ## Install and use
@@ -45,14 +47,19 @@ agr run
 ```
 
 See [examples/read-only-smoke.graph.json](examples/read-only-smoke.graph.json)
-for a safe graph that exercises both native adapters, and
+for a safe graph that exercises both native adapters,
+[examples/claudex-smoke.graph.json](examples/claudex-smoke.graph.json) for the
+proxy-routed launcher, and
 [skills/agent-graph-runtime/references/graph-format.md](skills/agent-graph-runtime/references/graph-format.md)
 for the complete graph format.
 
 ## Runtime contract
 
 - `codex` nodes use `codex exec`, JSON schema output, and Codex sandboxing.
-- `claude` nodes use `claude -p`, JSON schema output, and bounded tools.
+- `claude` nodes use native `claude -p`, JSON schema output, and bounded tools.
+- `claudex` nodes use the same print-mode protocol through the PATH-resolved
+  Claudex launcher. They retain distinct evidence and never fall back to native
+  Claude or Codex.
 - review nodes are read-only; implementation nodes are workspace-scoped.
 - configured checks run outside the model and gate acceptance.
 - state is atomically persisted under `.agent-graph/runs/<run-id>/`; raw CLI
@@ -61,6 +68,10 @@ for the complete graph format.
 - external actions are off by default and require both graph opt-in and an exact
   accepted human gate.
 
+Claudex owns its proxy, authentication, main Sol model, Luna subagent routing,
+effort, compaction, and context-window settings. A graph using
+`executor: "claudex"` therefore cannot set `model`.
+
 ## Security and limitations
 
 Review graph files before running them: `checks` are trusted shell commands.
@@ -68,7 +79,7 @@ The runtime never bypasses CLI permissions, auto-approves a gate, reverts an
 ownership violation, deploys, pushes, or sends messages unless an explicitly
 authorized external-action node defines that operation.
 
-Parallel nodes share one checkout in v0.1.0. Their ownership patterns must be
+Parallel nodes share one checkout in v0.2.0. Their ownership patterns must be
 disjoint, and wave changes plus handoff claims are checked. Because Git cannot
 attribute a same-checkout path to one concurrent process, use
 `maxConcurrency: 1` when strict per-process attribution matters. Automated

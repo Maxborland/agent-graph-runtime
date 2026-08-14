@@ -103,3 +103,21 @@ test("validate enforces review, gate, and external-action safety contracts", () 
   assert.match(errors, /external.*requires an executor/);
   assert.match(errors, /external.*requires a target/);
 });
+
+test("validate accepts Claudex as a first-class executor", () => {
+  const graph = baseGraph();
+  graph.nodes[0]!.executor = "claudex";
+
+  assert.deepEqual(validateGraph(graph).errors, []);
+});
+
+test("validate rejects graph-level model overrides for Claudex", () => {
+  const graph = baseGraph();
+  graph.nodes[0]!.executor = "claudex";
+  graph.nodes[0]!.model = "another-model";
+
+  assert.match(
+    validateGraph(graph).errors.join("\n"),
+    /Claudex node "contract" cannot override the launcher model/,
+  );
+});

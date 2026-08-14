@@ -1,7 +1,7 @@
 {
   "name": "@quidni/agent-graph-runtime",
-  "version": "0.1.0",
-  "description": "Local graph runtime for autonomous Codex CLI and Claude Code workflows",
+  "version": "0.2.0",
+  "description": "Local graph runtime for autonomous Codex, Claude Code, and Claudex workflows",
   "type": "module",
   "bin": {
     "agr": "dist/src/cli.js"

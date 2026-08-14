@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "run": {
+    "id": "installed-claudex-smoke-v1",
+    "objective": "Prove that the configured Claudex launcher can inspect this package and return a validated structured handoff without modifying files",
+    "repository": ".",
+    "maxConcurrency": 1,
+    "allowExternalActions": false,
+    "codeGraph": false
+  },
+  "nodes": [
+    {
+      "id": "claudex-review",
+      "type": "review",
+      "executor": "claudex",
+      "prompt": "Read package.json, README.md, and docs/SPEC.md. Confirm that Claudex is a first-class executor with launcher-owned model routing. Do not edit any file.",
+      "needs": [],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1,
+      "timeoutMs": 300000
+    },
+    {
+      "id": "package-checks",
+      "type": "verify",
+      "needs": ["claudex-review"],
+      "owns": [],
+      "checks": ["pnpm test"],
+      "maxAttempts": 1,
+      "timeoutMs": 120000
+    }
+  ]
+}

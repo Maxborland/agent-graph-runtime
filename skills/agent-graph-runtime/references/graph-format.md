@@ -47,6 +47,8 @@ The graph is JSON with `version`, `run`, and `nodes`.
 
 - `codex`: `codex exec` with structured output and workspace/read-only sandbox.
 - `claude`: `claude -p` with structured output and bounded tools.
+- `claudex`: the configured Claudex launcher using the Claude Code print-mode
+  protocol. Do not set `model`; the launcher owns Sol/Luna routing and context.
 - `shell`: deterministic commands from `checks`; use only for trusted graphs.
 
 ## Ownership
@@ -84,4 +86,3 @@ migrations, generated files, and shared schemas explicitly.
 
 The graph must also set `run.allowExternalActions` to `true`. This only enables
 the capability; `agr approve` remains mandatory.
-

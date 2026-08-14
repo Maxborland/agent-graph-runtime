@@ -28,3 +28,31 @@ test("Windows command resolution respects PATH order and wraps an npm cmd shim",
     ]);
   }
 });
+
+test("Windows command resolution invokes a PowerShell launcher non-interactively", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-path-ps1-"));
+  const launcher = join(root, "claudex.ps1");
+  await writeFile(launcher, "exit 0\r\n");
+
+  try {
+    const resolved = await resolveSpawnCommand(
+      "claudex",
+      ["-p", "--output-format", "json"],
+      { PATH: root },
+      "win32",
+    );
+    assert.equal(resolved.command, "pwsh.exe");
+    assert.deepEqual(resolved.args, [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      launcher,
+      "-p",
+      "--output-format",
+      "json",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,6 +1,6 @@
 ---
 name: agent-graph-runtime
-description: Runs and resumes dependency-graph coding workflows through the local agr CLI, Codex CLI, and Claude Code while preserving ownership, evidence, checks, and human gates. Use when the user asks for graph engineering, autonomous multi-agent implementation, resumable agent work, or execution of an .agent-graph graph.
+description: Runs and resumes dependency-graph coding workflows through the local agr CLI, Codex CLI, native Claude Code, or Claudex while preserving ownership, evidence, checks, and human gates. Use when the user asks for graph engineering, autonomous multi-agent implementation, resumable agent work, or execution of an .agent-graph graph.
 ---
 
 # Agent Graph Runtime
@@ -18,8 +18,10 @@ state, dependencies, approvals, or evidence only in conversation.
 5. Read `agr status <graph>` and the referenced evidence files. Treat model
    handoffs as claims; report only checks actually captured by the runtime.
 
-`agr run` directly invokes installed `codex exec` and `claude -p` adapters. Do
-not spawn duplicate agents around a node already owned by the runtime.
+`agr run` directly invokes installed `codex exec`, native `claude -p`, or
+proxy-routed `claudex` adapters. Do not spawn duplicate agents around a node
+already owned by the runtime. Treat `claude` and `claudex` as separate executor
+identities; never substitute one when another fails.
 
 ## Human gates
 
@@ -42,6 +44,8 @@ New scope or a different target requires new authorization.
 - Never edit `state.json` or `events.jsonl` manually.
 - Never revert unexpected repository changes automatically. Preserve them and
   report the ownership failure.
+- Never add `model` to a Claudex node. Its launcher owns model, effort,
+  subagent, proxy, compaction, and context-window configuration.
 
 ## Authoring graphs
 
@@ -55,4 +59,3 @@ work.
 Say complete only when the run status is `completed` and all required nodes are
 `accepted`. Report failed, blocked, awaiting-approval, or unverified nodes
 exactly as recorded.
-
