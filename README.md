@@ -59,7 +59,8 @@ for the complete graph format.
 - `claude` nodes use native `claude -p`, JSON schema output, and bounded tools.
 - `claudex` nodes use the same print-mode protocol through the PATH-resolved
   Claudex launcher. They retain distinct evidence and never fall back to native
-  Claude or Codex.
+  Claude or Codex. The runtime leaves launcher tool discovery intact so its
+  workflows, plugins, skills, and configured Luna subagents remain available.
 - review nodes are read-only; implementation nodes are workspace-scoped.
 - configured checks run outside the model and gate acceptance.
 - state is atomically persisted under `.agent-graph/runs/<run-id>/`; raw CLI

@@ -22,6 +22,8 @@ state, dependencies, approvals, or evidence only in conversation.
 proxy-routed `claudex` adapters. Do not spawn duplicate agents around a node
 already owned by the runtime. Treat `claude` and `claudex` as separate executor
 identities; never substitute one when another fails.
+Claudex keeps its launcher-discovered workflows, plugins, skills, and subagents;
+review nodes still receive a write-tool denylist.
 
 ## Human gates
 

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "run": {
-    "id": "installed-claudex-smoke-v1",
-    "objective": "Prove that the configured Claudex launcher can inspect this package and return a validated structured handoff without modifying files",
+    "id": "installed-claudex-smoke-v3",
+    "objective": "Prove that the configured Claudex launcher and its Luna workflow can inspect this package and return a validated structured handoff without modifying files",
     "repository": ".",
     "maxConcurrency": 1,
     "allowExternalActions": false,
@@ -13,7 +13,7 @@
       "id": "claudex-review",
       "type": "review",
       "executor": "claudex",
-      "prompt": "Read package.json, README.md, and docs/SPEC.md. Confirm that Claudex is a first-class executor with launcher-owned model routing. Do not edit any file.",
+      "prompt": "Use Workflow agent() exactly once with model:'gpt-5.6-luna' and effort:'max'; ask it only to reply LUNA_OK. After it succeeds, read package.json, README.md, and docs/SPEC.md yourself and confirm that Claudex is a first-class executor with launcher-owned model routing. Include the Luna marker and file evidence in the handoff. Do not edit any file.",
       "needs": [],
       "owns": [],
       "checks": [],

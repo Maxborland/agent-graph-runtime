@@ -89,6 +89,13 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
   survive the launcher-to-native-CLI boundary. Graph nodes cannot
   override its model because the launcher owns Sol/Luna routing, effort, proxy
   authentication, compaction, and the 262144-token context contract.
+- **AC14 Claudex extension discovery:** The runtime does not replace Claudex's
+  default tool set, so launcher-provided workflows, plugins, skills, and Luna
+  subagent routing remain discoverable. It pre-authorizes only `Workflow` and
+  `Skill`, which are needed for non-interactive launcher orchestration and
+  local skill loading. Review nodes still
+  pass an explicit write-tool denylist; repository ownership verification
+  remains mandatory.
 
 ## Failure behavior and edge cases
 
@@ -142,3 +149,7 @@ rewritten `state.json`, executor outputs, prompts, and evidence.
 - AC13 → graph validation rejects `model` on Claudex nodes; Windows command
   resolution wraps `.ps1` through non-interactive PowerShell; real read-only
   Claudex smoke preserves launcher-owned routing.
+- AC14 → adapter argv test proves Claudex receives no restrictive `--tools`
+  override, receives only `Workflow,Skill` as explicit allowed extensions, and
+  review receives `--disallowedTools`; live smoke records both Sol main-agent
+  and Luna subagent model usage.

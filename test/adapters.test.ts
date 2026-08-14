@@ -170,3 +170,31 @@ test("Claudex adapter independently protects launcher-owned model routing", asyn
     /Claudex nodes cannot override the launcher model/,
   );
 });
+
+test("Claudex preserves launcher tool discovery while denying review write tools", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-claudex-tools-"));
+  const fake = join(root, "capture-claudex.mjs");
+  await writeFile(
+    fake,
+    `const handoff = { status: "complete", summary: JSON.stringify(process.argv.slice(2)), changedFiles: [], verification: [], gaps: [] }; process.stdout.write(JSON.stringify({ type: "result", structured_output: handoff }));`,
+    "utf8",
+  );
+
+  try {
+    const result = await new ClaudexAdapter(process.execPath, [fake]).execute({
+      node: { ...node, type: "review", executor: "claudex", owns: [] },
+      repositoryRoot: root,
+      prompt: "test prompt",
+      artifactsDirectory: root,
+      timeoutMs: 10_000,
+    });
+    const args = JSON.parse(result.handoff.summary) as string[];
+    assert.equal(args.includes("--tools"), false);
+    assert.equal(args.includes("--allowedTools"), true);
+    assert.equal(args.includes("Workflow,Skill"), true);
+    assert.equal(args.includes("--disallowedTools"), true);
+    assert.equal(args.includes("Edit,Write,NotebookEdit"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

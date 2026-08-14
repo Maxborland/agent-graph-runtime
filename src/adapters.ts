@@ -78,6 +78,7 @@ class ClaudeProtocolAdapter implements AgentAdapter {
     private readonly providerLabel = "Claude",
     private readonly artifactStem = "claude",
     private readonly allowModelOverride = true,
+    private readonly preserveToolDiscovery = false,
   ) {}
 
   async execute(request: AdapterRequest): Promise<AdapterResult> {
@@ -96,9 +97,12 @@ class ClaudeProtocolAdapter implements AgentAdapter {
       JSON.stringify(outputSchema),
       "--permission-mode",
       readOnly ? "dontAsk" : "acceptEdits",
-      "--tools",
-      tools,
     ];
+    if (this.preserveToolDiscovery) {
+      args.push("--allowedTools", "Workflow,Skill");
+    } else {
+      args.push("--tools", tools);
+    }
     if (readOnly) args.push("--disallowedTools", "Edit,Write,NotebookEdit");
     if (request.node.model) args.push("--model", request.node.model);
     const processResult = await runProcess(
@@ -121,13 +125,13 @@ class ClaudeProtocolAdapter implements AgentAdapter {
 
 export class ClaudeAdapter extends ClaudeProtocolAdapter {
   constructor(command = "claude", prefixArguments: string[] = []) {
-    super(command, prefixArguments, "Claude", "claude", true);
+    super(command, prefixArguments, "Claude", "claude", true, false);
   }
 }
 
 export class ClaudexAdapter extends ClaudeProtocolAdapter {
   constructor(command = "claudex", prefixArguments: string[] = []) {
-    super(command, prefixArguments, "Claudex", "claudex", false);
+    super(command, prefixArguments, "Claudex", "claudex", false, true);
   }
 }
 
