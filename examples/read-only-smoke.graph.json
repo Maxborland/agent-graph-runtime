@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "run": {
+    "id": "installed-cli-smoke",
+    "objective": "Prove that both installed agent CLIs can inspect this package and return validated structured handoffs",
+    "repository": ".",
+    "maxConcurrency": 1,
+    "allowExternalActions": false,
+    "codeGraph": false
+  },
+  "nodes": [
+    {
+      "id": "codex-review",
+      "type": "review",
+      "executor": "codex",
+      "prompt": "Read package.json and README.md. Confirm that the package exposes an agr binary and describe no more than one gap. Do not edit any file.",
+      "needs": [],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1,
+      "timeoutMs": 180000
+    },
+    {
+      "id": "claude-review",
+      "type": "review",
+      "executor": "claude",
+      "prompt": "Read package.json and docs/SPEC.md. Confirm that both Codex and Claude adapters are part of the intended runtime. Do not edit any file.",
+      "needs": ["codex-review"],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1,
+      "timeoutMs": 180000
+    },
+    {
+      "id": "package-checks",
+      "type": "verify",
+      "needs": ["claude-review"],
+      "owns": [],
+      "checks": ["pnpm test"],
+      "maxAttempts": 1,
+      "timeoutMs": 120000
+    }
+  ]
+}

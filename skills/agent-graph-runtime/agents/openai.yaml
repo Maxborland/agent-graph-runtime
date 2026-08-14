@@ -1,0 +1,8 @@
+interface:
+  display_name: "Agent Graph Runtime"
+  short_description: "Run resumable Codex and Claude task graphs"
+  default_prompt: "Validate and execute the repository's agent graph, stopping at every human gate."
+
+policy:
+  allow_implicit_invocation: true
+
