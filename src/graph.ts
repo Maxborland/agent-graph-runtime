@@ -4,6 +4,7 @@ import type {
   GraphValidationResult,
 } from "./types.js";
 import { executorNames } from "./types.js";
+import { isSafeRunId } from "./run-id.js";
 
 const nodeTypes = new Set([
   "agent",
@@ -15,7 +16,7 @@ const nodeTypes = new Set([
 const executors = new Set<string>(executorNames);
 const agentDispatchNodeTypes = new Set(["agent", "review", "external_action"]);
 const graphProperties = new Set(["version", "run", "nodes"]);
-const runProperties = new Set(["id", "objective", "repository", "maxConcurrency", "allowExternalActions", "codeGraph", "advisor"]);
+const runProperties = new Set(["id", "objective", "repository", "maxConcurrency", "baseCommit", "allowExternalActions", "codeGraph", "advisor"]);
 const advisorProperties = new Set(["executor", "model", "instructions", "stopOnBlocker"]);
 const nodeProperties = new Set([
   "id", "type", "executor", "prompt", "target", "needs", "owns",
@@ -40,10 +41,14 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
   }
   if (graph.version !== 1) errors.push("version must be 1");
   if (typeof graph.run.id !== "string" || !graph.run.id.trim()) errors.push("run.id is required");
+  else if (!isSafeRunId(graph.run.id)) errors.push("run.id must be a safe cross-platform runtime identifier and a single path component");
   if (typeof graph.run.objective !== "string" || !graph.run.objective.trim()) errors.push("run.objective is required");
   if (typeof graph.run.repository !== "string" || !graph.run.repository.trim()) errors.push("run.repository is required");
   if (!Number.isInteger(graph.run?.maxConcurrency) || graph.run.maxConcurrency < 1) {
     errors.push("run.maxConcurrency must be a positive integer");
+  }
+  if (graph.run.baseCommit !== undefined && !/^[0-9a-f]{40}$/.test(graph.run.baseCommit)) {
+    errors.push("run.baseCommit must be an exact 40-character lowercase Git commit ID");
   }
   if (graph.run.allowExternalActions !== undefined && typeof graph.run.allowExternalActions !== "boolean") {
     errors.push("run.allowExternalActions must be a boolean");
@@ -92,6 +97,11 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
     errors.push(...unknownPropertyErrors(node, nodeProperties, `node "${String(node.id ?? index)}"`));
     if (typeof node.id !== "string" || !node.id.trim()) {
       errors.push("every node requires an id");
+      dependencyShapeValid = false;
+      continue;
+    }
+    if (!isSafeRunId(node.id)) {
+      errors.push(`node "${node.id}" id must be a safe runtime identifier`);
       dependencyShapeValid = false;
       continue;
     }

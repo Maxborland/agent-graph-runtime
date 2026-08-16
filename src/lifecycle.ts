@@ -1,4 +1,6 @@
-import type { GraphDefinition, GraphNodeDefinition, RunEvent, RunState } from "./types.js";
+import { randomUUID } from "node:crypto";
+
+import type { AttemptRecord, GraphDefinition, GraphNodeDefinition, RunEvent, RunState } from "./types.js";
 
 export type LifecycleEvent = Omit<RunEvent, "seq" | "at">;
 
@@ -35,9 +37,15 @@ export class RunLifecycle {
     const events: LifecycleEvent[] = [];
     for (const id of invalidated) {
       const nodeState = this.state.nodes[id]!;
+      if (nodeState.currentAttemptId) {
+        const current = this.state.attempts[nodeState.currentAttemptId];
+        if (current) current.status = "superseded";
+      }
       nodeState.status = "pending";
-      nodeState.attempts = 0;
-      nodeState.evidenceFiles = [];
+      nodeState.generation += 1;
+      nodeState.generationAttempts = 0;
+      delete nodeState.currentAttemptId;
+      delete nodeState.acceptedAttemptId;
       delete nodeState.retryBlocked;
       delete nodeState.approvedTarget;
       delete nodeState.lastError;
@@ -67,7 +75,7 @@ export class RunLifecycle {
         if (!nodeState) return false;
         if (!["pending", "failed"].includes(nodeState.status)) return false;
         if (nodeState.retryBlocked) return false;
-        if (nodeState.attempts >= node.maxAttempts) return false;
+        if (nodeState.generationAttempts >= node.maxAttempts) return false;
         return node.needs.every((dependency) => this.state.nodes[dependency]?.status === "accepted");
       })
       .slice(0, capacity);
@@ -132,6 +140,21 @@ export class RunLifecycle {
     const nodeState = this.state.nodes[nodeId]!;
     nodeState.status = "running";
     nodeState.attempts += 1;
+    nodeState.generationAttempts += 1;
+    const attemptId = randomUUID();
+    nodeState.currentAttemptId = attemptId;
+    const attempt: AttemptRecord = {
+      schemaVersion: 1,
+      attemptId,
+      nodeId,
+      planRevisionId: this.state.activePlanRevisionId,
+      generation: nodeState.generation,
+      ordinal: nodeState.attempts,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      evidence: [],
+    };
+    this.state.attempts[attemptId] = attempt;
     delete nodeState.lastError;
     return { type: "node_started", nodeId, detail: `attempt ${nodeState.attempts}` };
   }
@@ -141,6 +164,8 @@ export class RunLifecycle {
     if (!nodeState) throw new Error(`node "${nodeId}" does not exist`);
     if (nodeState.status !== "running") throw new Error(`node "${nodeId}" is not running`);
     nodeState.status = "accepted";
+    if (nodeState.currentAttemptId) nodeState.acceptedAttemptId = nodeState.currentAttemptId;
+    this.finishAttempt(nodeState.currentAttemptId, "accepted");
     delete nodeState.retryBlocked;
     delete nodeState.lastError;
     return { type: "node_accepted", nodeId };
@@ -151,6 +176,7 @@ export class RunLifecycle {
     if (!nodeState) throw new Error(`node "${nodeId}" does not exist`);
     if (nodeState.status !== "running") throw new Error(`node "${nodeId}" is not running`);
     nodeState.status = "failed";
+    this.finishAttempt(nodeState.currentAttemptId, "failed", error);
     nodeState.lastError = error;
     if (retryBlocked) nodeState.retryBlocked = true;
     else delete nodeState.retryBlocked;
@@ -174,6 +200,11 @@ export class RunLifecycle {
       const definition = this.graph.nodes.find((candidate) => candidate.id === nodeId);
       const requiresReconciliation = definition?.type === "external_action";
       nodeState.status = requiresReconciliation ? "failed" : "pending";
+      this.finishAttempt(
+        nodeState.currentAttemptId,
+        requiresReconciliation ? "failed" : "superseded",
+        requiresReconciliation ? "external action was interrupted" : undefined,
+      );
       if (requiresReconciliation) {
         nodeState.retryBlocked = true;
         nodeState.lastError = "external action was interrupted; inspect partial effects, then use agr retry explicitly";
@@ -198,6 +229,7 @@ export class RunLifecycle {
     nodeState.lastError = terminationUnconfirmed
       ? "cancelled and process-tree termination was not confirmed; reconcile surviving work before agr retry"
       : "cancelled during execution; inspect partial effects before agr retry";
+    this.finishAttempt(nodeState.currentAttemptId, "failed", nodeState.lastError);
     return { type: "node_interrupted", nodeId, detail: nodeState.lastError };
   }
 
@@ -221,6 +253,20 @@ export class RunLifecycle {
       severity: blocker.severity,
       evidenceFile: blocker.evidenceFile,
     };
+  }
+
+  private finishAttempt(
+    attemptId: string | undefined,
+    status: AttemptRecord["status"],
+    error?: string,
+  ): void {
+    if (!attemptId) return;
+    const attempt = this.state.attempts[attemptId];
+    if (!attempt) return;
+    attempt.status = status;
+    attempt.finishedAt = new Date().toISOString();
+    if (error === undefined) delete attempt.error;
+    else attempt.error = error;
   }
 
   finishWhenIdle(): LifecycleEvent & { type: "run_completed" | "run_needs_attention" | "run_failed" } {

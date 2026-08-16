@@ -1,9 +1,11 @@
 # Agent Graph Runtime — implementation plan
 
-Status: proposed implementation sequence for the target architecture in
+Status: WP1-WP6 implemented on the current branch; WP7-WP12 proposed. This is
+the implementation sequence for the target architecture in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) and the phased outcomes in
-[`ROADMAP.md`](ROADMAP.md). The current v0.6 behavior remains governed by
-[`SPEC.md`](SPEC.md).
+[`ROADMAP.md`](ROADMAP.md). The v0.6 baseline remains governed by
+[`SPEC.md`](SPEC.md); implemented v0.7 additions are governed by
+[`V0.7-DELIVERY-SPEC.md`](V0.7-DELIVERY-SPEC.md).
 
 ## Implementation policy
 

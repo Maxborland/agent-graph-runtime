@@ -1,7 +1,8 @@
 # Agent Graph Runtime — behavioral specification
 
-> This document defines implemented v0.6 behavior. Proposed future behavior is
-> kept separately in the [target architecture](ARCHITECTURE.md),
+> This document defines the implemented v0.6 baseline. Implemented v0.7
+> additions are defined in the [v0.7 delivery specification](V0.7-DELIVERY-SPEC.md).
+> Later proposed behavior is kept separately in the [target architecture](ARCHITECTURE.md),
 > [implementation roadmap](ROADMAP.md), and
 > [implementation plan](IMPLEMENTATION_PLAN.md) so planned contracts are not
 > mistaken for shipped runtime guarantees.

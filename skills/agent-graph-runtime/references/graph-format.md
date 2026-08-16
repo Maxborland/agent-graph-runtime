@@ -16,6 +16,7 @@ exploration outside the review sandbox even when a node has no explicit
     "objective": "Observable user outcome",
     "repository": ".",
     "maxConcurrency": 2,
+    "baseCommit": "optional exact 40-character commit for explicit run chaining",
     "codeGraph": true,
     "allowExternalActions": false,
     "advisor": {
@@ -46,6 +47,17 @@ exploration outside the review sandbox even when a node has no explicit
   ]
 }
 ```
+
+Omit `run.baseCommit` to start from the current committed `HEAD`. Set it only to
+an explicit commit such as a prior immutable `RunResult.resultCommit`; mutable
+state from another worktree is never an implicit base.
+`run.id` is a cross-platform runtime identifier, not a path: use one path-safe
+component of at most 128 characters. Spaces are supported for v0.6
+compatibility; separators, control characters, trailing dots/spaces, and Windows
+device names such as `CON` are rejected. Git worktree names add a stable hash so
+distinct logical IDs cannot collide.
+Node IDs use the same path-safe identifier grammar because they name evidence
+and prompt artifacts.
 
 ## Node types
 

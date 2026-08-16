@@ -5,8 +5,8 @@ description: Runs and resumes dependency-graph coding workflows through the loca
 
 # Agent Graph Runtime
 
-Use the deterministic `agr` runtime as the source of truth. Do not recreate run
-state, dependencies, approvals, or evidence only in conversation.
+Use `agr` as the source of truth. Do not recreate state, dependencies,
+approvals, or evidence only in conversation.
 
 ## Start or resume
 
@@ -37,14 +37,13 @@ Claudex denies `Workflow`, `Task`, `Agent`, and all Bash except standalone
 - Use `agr inspect <graph>` for the compact active-node/milestone view and `agr
   why <graph>` for structured recovery guidance. Reconcile persisted state with
   the original run shell instead of launching a replacement.
-- Stop only at `completed`, `failed`, `needs_attention`, `awaiting_approval`,
-  `cancelled`, or a concrete observation blocker.
+- Stop only at `completed`, `failed`, `needs_attention`, `awaiting_approval`, `cancelled`, or a concrete observation blocker.
 - Never start a second `agr run` for the same run ID. The runtime lock rejects
   duplicate ownership. Use `agr cancel <graph>` or Ctrl+C for cooperative
   process-tree termination; a cancelled run exits with code 130. Inspect partial
-  effects, then use `agr retry <node> <graph>` before resuming a cancelled node.
-- Use `agr unlock <graph> --force` only after the user verifies the recorded
-  owner stopped; foreign-host and PID-reused locks fail closed.
+  effects. An uncertain `external_action` needs a fresh exact approval and `agr
+  retry <node> <graph> --reconciliation <evidence-file>`.
+- Use `agr unlock <graph> --force` only after the user verifies the recorded owner stopped; foreign-host and PID-reused locks fail closed.
 
 ## Human gates
 
@@ -65,8 +64,9 @@ New scope or a different target requires new authorization.
   `blocked`, or the runtime cannot safely retry it. Inspect its evidence and
   partial effects; never start another attempt automatically.
 - `agr run <graph>` recovers ordinary nodes left running after interruption.
-  An interrupted `external_action` stays retry-blocked until its partial effects
-  are inspected and `agr retry` is invoked explicitly.
+  An interrupted `external_action` stays retry-blocked until its effects are
+  inspected, reconciliation recorded, a fresh receipt issued, and `agr retry
+  --reconciliation` invoked explicitly.
 - Use `agr events`, `agr logs [node]`, and `agr report` instead of reading raw
   runtime files by hand. `agr runs` lists persisted runs.
 - Use `agr retry <node-id> <graph>` only when the user or verified evidence

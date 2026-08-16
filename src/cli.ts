@@ -19,6 +19,7 @@ import {
   runDirectory,
 } from "./cli-tools.js";
 import { validateGraph } from "./graph.js";
+import { currentBranch, integrateRun, rollbackRun } from "./git-integration.js";
 import { OperatorControl } from "./operator-control.js";
 import { buildExecutionPlan } from "./planner.js";
 import { GraphRunner, type RunProgressEvent } from "./runner.js";
@@ -43,7 +44,7 @@ async function main(args: string[]): Promise<void> {
   }
   assertCommandOptions(command, args.slice(1));
   if (["--version", "-V"].includes(command)) {
-    console.log("0.6.0");
+    console.log("0.7.0");
     return;
   }
 
@@ -380,6 +381,27 @@ async function main(args: string[]): Promise<void> {
     return;
   }
 
+  if (command === "integrate") {
+    const values = positional(args.slice(1));
+    const runId = required(values[0], "integrate requires RUN_ID");
+    const { repositoryRoot } = await loadGraph(values[1]);
+    const target = optionValue(args, "--target") ?? await currentBranch(repositoryRoot);
+    const result = await integrateRun(repositoryRoot, runId, target, args.includes("--dry-run"));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`${result.mutated ? "Integrated" : "Preview"} ${runId} -> ${target} (${result.mode}) at ${result.targetAfter}`);
+    return;
+  }
+
+  if (command === "rollback") {
+    const values = positional(args.slice(1));
+    const runId = required(values[0], "rollback requires RUN_ID");
+    const { repositoryRoot } = await loadGraph(values[1]);
+    const result = await rollbackRun(repositoryRoot, runId, args.includes("--dry-run"));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`${result.mutated ? "Rolled back" : "Preview rollback"} ${runId} on ${result.targetBranch} at ${result.targetAfter}`);
+    return;
+  }
+
   if (command === "approve") {
     const values = positional(args.slice(1));
     const nodeId = required(values[0], "approve requires NODE_ID");
@@ -395,7 +417,10 @@ async function main(args: string[]): Promise<void> {
     const values = positional(args.slice(1));
     const nodeId = required(values[0], "retry requires NODE_ID");
     const { graph, repositoryRoot } = await loadGraph(values[1]);
-    const state = await new OperatorControl(graph, repositoryRoot).retry(nodeId);
+    const state = await new OperatorControl(graph, repositoryRoot).retry(
+      nodeId,
+      optionValue(args, "--reconciliation"),
+    );
     if (json) console.log(JSON.stringify(state, null, 2));
     else printState(state);
     return;
@@ -579,7 +604,9 @@ Usage:
   agr runs|events|report [GRAPH] [--json]
   agr logs [NODE_ID] [GRAPH] [--json]
   agr approve NODE_ID TARGET [GRAPH]
-  agr retry NODE_ID [GRAPH]
+  agr retry NODE_ID [GRAPH] [--reconciliation FILE]
+  agr integrate RUN_ID [GRAPH] [--target BRANCH] [--dry-run]
+  agr rollback RUN_ID [GRAPH] [--dry-run]
   agr schema
   agr node explain NODE_ID [GRAPH]
   agr graph [GRAPH] [--format mermaid]
@@ -616,7 +643,7 @@ function nonNegativeIntegerOption(args: string[], name: string, fallback: number
 }
 
 function positional(args: string[]): string[] {
-  const valueFlags = new Set(["--heartbeat-ms", "--interval-ms", "--timeout-ms", "--after", "--template", "--format", "--project", "--phase", "--message", "--percent"]);
+  const valueFlags = new Set(["--heartbeat-ms", "--interval-ms", "--timeout-ms", "--after", "--template", "--format", "--project", "--phase", "--message", "--percent", "--reconciliation", "--target"]);
   const values: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -640,7 +667,8 @@ function assertCommandOptions(command: string, args: string[]): void {
     run: ["--json", "--heartbeat-ms", "--verbose"], progress: ["--json", "--phase", "--message", "--percent"], cancel: ["--json"], unlock: ["--json", "--force"],
     status: ["--json", "--watch", "--interval-ms"], runs: ["--json"], events: ["--json"],
     follow: ["--after", "--format", "--interval-ms"], wait: ["--json", "--after", "--timeout-ms"], inspect: ["--json"], why: ["--json"], advisor: ["--json"],
-    logs: ["--json"], report: ["--json"], approve: ["--json"], retry: ["--json"],
+    logs: ["--json"], report: ["--json"], approve: ["--json"], retry: ["--json", "--reconciliation"],
+    integrate: ["--json", "--target", "--dry-run"], rollback: ["--json", "--dry-run"],
     doctor: ["--json"], schema: ["--json"], node: ["--json"], graph: ["--json", "--format"],
     completion: [], "install-skills": ["--json", "--project", "--user", "--dry-run"],
   };

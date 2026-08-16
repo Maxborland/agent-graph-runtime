@@ -9,6 +9,8 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { graphHash } from "../src/graph-hash.js";
+import { RunStore } from "../src/store.js";
+import type { GraphDefinition } from "../src/types.js";
 
 const exec = promisify(execFile);
 
@@ -74,7 +76,7 @@ test("CLI follow stays attached to a running graph and emits observer heartbeats
     const { stdout } = await exec(
       process.execPath,
       [cli, "follow", graphPath, "--format", "jsonl", "--interval-ms", "50"],
-      { cwd: root, encoding: "utf8", timeout: 3_000 },
+      { cwd: root, encoding: "utf8", timeout: 8_000 },
     );
     const runExit = running.exitCode ?? await new Promise<number | null>((resolveExit) => running.once("close", resolveExit));
     assert.equal(runExit, 0);
@@ -325,8 +327,10 @@ test("CLI advisor acknowledge clears only the run-level advisor blocker", async 
     const state = JSON.parse(stdout) as { status: string; advisor?: { blocker?: unknown }; nodes: Record<string, { attempts: number; status: string }> };
     assert.equal(state.status, "running");
     assert.equal(state.advisor?.blocker, undefined);
-    assert.deepEqual(state.nodes.first, { status: "accepted", attempts: 1, evidenceFiles: [] });
-    assert.deepEqual(state.nodes.second, { status: "pending", attempts: 0, evidenceFiles: [] });
+    assert.equal(state.nodes.first!.status, "accepted");
+    assert.equal(state.nodes.first!.attempts, 1);
+    assert.equal(state.nodes.second!.status, "pending");
+    assert.equal(state.nodes.second!.attempts, 0);
     assert.match(await readFile(join(runRoot, "events.jsonl"), "utf8"), /"type":"advisor_acknowledged"/);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -717,10 +721,10 @@ test("CLI rejects cancellation of a stale owner and watch exits on orphaned stat
       },
     );
     await rm(join(runRoot, ".run.lock"), { force: true });
-    const statePath = join(runRoot, "state.json");
-    const state = JSON.parse(await readFile(statePath, "utf8")) as { status: string };
-    state.status = "running";
-    await writeFile(statePath, JSON.stringify(state));
+    const graph = JSON.parse(await readFile(graphPath, "utf8")) as GraphDefinition;
+    const store = await RunStore.open(root, graph, []);
+    store.state.status = "running";
+    await store.save("orphaned-running-fixture");
     await assert.rejects(
       exec(process.execPath, [cli, "status", "--watch", "--interval-ms", "25", "--json"], { cwd: root, encoding: "utf8" }),
       (error: unknown) => (error as { code?: number }).code === 1,

@@ -12,6 +12,7 @@ import {
   readRunEventArtifact,
   readRunStateArtifact,
 } from "./observation.js";
+import { assertSafeRunId } from "./run-id.js";
 import type { ExecutorName, GraphDefinition, GraphNodeDefinition, RunEvent, RunState } from "./types.js";
 
 const exec = promisify(execFile);
@@ -29,10 +30,16 @@ export const graphSchema = {
       additionalProperties: false,
       required: ["id", "objective", "repository", "maxConcurrency"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: {
+          type: "string",
+          minLength: 1,
+          maxLength: 128,
+          pattern: "^[^<>:\"/\\\\|?*\\u0000-\\u001F]+$",
+        },
         objective: { type: "string", minLength: 1 },
         repository: { type: "string", minLength: 1 },
         maxConcurrency: { type: "integer", minimum: 1 },
+        baseCommit: { type: "string", pattern: "^[0-9a-f]{40}$" },
         allowExternalActions: { type: "boolean" },
         codeGraph: { type: "boolean" },
         advisor: {
@@ -59,7 +66,12 @@ export const graphSchema = {
         additionalProperties: false,
         required: ["id", "type", "needs", "owns", "checks", "maxAttempts"],
         properties: {
-          id: { type: "string", minLength: 1 },
+          id: {
+            type: "string",
+            minLength: 1,
+            maxLength: 128,
+            pattern: "^[^<>:\"/\\\\|?*\\u0000-\\u001F]+$",
+          },
           type: { enum: ["agent", "verify", "review", "human_gate", "external_action"] },
           executor: { enum: ["codex", "claude", "claudex", "shell"] },
           prompt: { type: "string" },
@@ -305,7 +317,7 @@ export async function diagnoseEnvironment(
 }
 
 export function runDirectory(repositoryRoot: string, runId: string): string {
-  return join(repositoryRoot, ".agent-graph", "runs", runId);
+  return join(repositoryRoot, ".agent-graph", "runs", assertSafeRunId(runId));
 }
 
 async function findOnPath(command: string): Promise<string | undefined> {

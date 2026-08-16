@@ -1,7 +1,8 @@
 # Agent Graph Runtime — implementation roadmap
 
-Status: proposed. This roadmap sequences target capabilities behind evidence
-gates. Version labels express dependency order, not delivery dates.
+Status: v0.7 implemented on the current branch; v0.8-v1.0 proposed. This
+roadmap sequences target capabilities behind evidence gates. Version labels
+express dependency order, not delivery dates.
 
 ## Roadmap rules
 
@@ -17,6 +18,9 @@ gates. Version labels express dependency order, not delivery dates.
   network-partition cases.
 
 ## v0.7 — Integrity and Git transactions
+
+Status: implemented; final acceptance evidence is tracked in
+[`V0.7-DELIVERY-SPEC.md`](V0.7-DELIVERY-SPEC.md).
 
 ### Outcome
 

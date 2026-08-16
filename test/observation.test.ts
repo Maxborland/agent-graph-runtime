@@ -7,11 +7,42 @@ import test from "node:test";
 import { parseRunEventLog, RunObserver } from "../src/observation.js";
 import type { RunState } from "../src/types.js";
 
+const versionedState = {
+  schemaVersion: 2 as const,
+  revision: 1,
+  lastAppliedEventSeq: 0,
+  activePlanRevisionId: "plan-fixture",
+  repository: { repositoryId: "fixture", root: ".", baseCommit: "fixture" },
+  attempts: {},
+  authority: {
+    schemaVersion: 1 as const,
+    mandate: {
+      schemaVersion: 1 as const,
+      mandateId: "mandate-fixture",
+      issuedBy: "human" as const,
+      planRevisionId: "plan-fixture",
+      allowedActions: [],
+      allowedTargets: [],
+      maxNodes: 0,
+      maxDepth: 0,
+      maxDurationMs: 0,
+      policyHash: "fixture",
+      issuedAt: "2026-08-16T00:00:00.000Z",
+    },
+    policyDecisions: [],
+    receipts: [],
+    reservations: [],
+    consumptions: [],
+    reconciliations: [],
+  },
+};
+
 test("observation reads one bounded state and event snapshot after a cursor", async () => {
   const root = await mkdtemp(join(tmpdir(), "agr-observation-snapshot-"));
   const runRoot = join(root, ".agent-graph", "runs", "observed");
   await mkdir(runRoot, { recursive: true });
   const state: RunState = {
+    ...versionedState,
     runId: "observed",
     graphHash: "fixture",
     status: "running",
@@ -19,8 +50,8 @@ test("observation reads one bounded state and event snapshot after a cursor", as
     updatedAt: "2026-08-16T00:00:02.000Z",
     baselineChangedFiles: [],
     nodes: {
-      active: { status: "running", attempts: 1, evidenceFiles: [] },
-      pending: { status: "pending", attempts: 0, evidenceFiles: [] },
+      active: { status: "running", attempts: 1, generation: 0, generationAttempts: 1, evidenceFiles: [] },
+      pending: { status: "pending", attempts: 0, generation: 0, generationAttempts: 0, evidenceFiles: [] },
     },
   };
   await writeFile(join(runRoot, "state.json"), JSON.stringify(state), "utf8");
@@ -55,13 +86,14 @@ test("observation wait returns timeout as data and wakes on a new event", async 
   const runRoot = join(root, ".agent-graph", "runs", "waiting");
   await mkdir(runRoot, { recursive: true });
   const state: RunState = {
+    ...versionedState,
     runId: "waiting",
     graphHash: "fixture",
     status: "running",
     createdAt: "2026-08-16T00:00:00.000Z",
     updatedAt: "2026-08-16T00:00:00.000Z",
     baselineChangedFiles: [],
-    nodes: { active: { status: "running", attempts: 1, evidenceFiles: [] } },
+    nodes: { active: { status: "running", attempts: 1, generation: 0, generationAttempts: 1, evidenceFiles: [] } },
   };
   await writeFile(join(runRoot, "state.json"), JSON.stringify(state), "utf8");
   await writeFile(join(runRoot, "events.jsonl"), `${JSON.stringify({ seq: 1, at: state.updatedAt, type: "node_started", nodeId: "active" })}\n`, "utf8");
@@ -95,6 +127,7 @@ test("observation explains an ownership stop with retry safety and paths", async
   const runRoot = join(root, ".agent-graph", "runs", "stopped");
   await mkdir(runRoot, { recursive: true });
   const state: RunState = {
+    ...versionedState,
     runId: "stopped",
     graphHash: "fixture",
     status: "needs_attention",
@@ -105,6 +138,8 @@ test("observation explains an ownership stop with retry safety and paths", async
       implementation: {
         status: "failed",
         attempts: 1,
+        generation: 0,
+        generationAttempts: 1,
         retryBlocked: true,
         lastError: "unexpected changed paths: apps/landing/a.ts, output/playwright/a.png",
         evidenceFiles: ["evidence/implementation-attempt-1.json"],
@@ -133,13 +168,14 @@ test("observation follow replays through the terminal event without duplicates",
   const runRoot = join(root, ".agent-graph", "runs", "followed");
   await mkdir(runRoot, { recursive: true });
   const state: RunState = {
+    ...versionedState,
     runId: "followed",
     graphHash: "fixture",
     status: "completed",
     createdAt: "2026-08-16T00:00:00.000Z",
     updatedAt: "2026-08-16T00:00:03.000Z",
     baselineChangedFiles: [],
-    nodes: { node: { status: "accepted", attempts: 1, evidenceFiles: [] } },
+    nodes: { node: { status: "accepted", attempts: 1, generation: 0, generationAttempts: 1, evidenceFiles: [] } },
   };
   await writeFile(join(runRoot, "state.json"), JSON.stringify(state), "utf8");
   await writeFile(

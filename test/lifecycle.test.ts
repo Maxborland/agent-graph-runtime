@@ -61,12 +61,49 @@ test("lifecycle retry invalidates the selected node and every descendant", () =>
   assert.deepEqual(events.map((event) => event.nodeId).sort(), ["a", "b"]);
   for (const id of ["a", "b"]) {
     assert.equal(state.nodes[id]!.status, "pending");
-    assert.equal(state.nodes[id]!.attempts, 0);
+    assert.equal(state.nodes[id]!.attempts, 1);
+    assert.equal(state.nodes[id]!.generation, 1);
     assert.equal(state.nodes[id]!.retryBlocked, undefined);
-    assert.deepEqual(state.nodes[id]!.evidenceFiles, []);
+    assert.deepEqual(state.nodes[id]!.evidenceFiles, [`evidence/${id}.json`]);
   }
   assert.equal(state.nodes.other!.status, "accepted");
   assert.equal(state.status, "running");
+});
+
+test("lifecycle retry appends unique attempts without resetting ordinal or evidence history", () => {
+  const graph: GraphDefinition = {
+    version: 1,
+    run: { id: "lifecycle-attempt-ledger", objective: "Preserve retry history", repository: ".", maxConcurrency: 1 },
+    nodes: [
+      { id: "work", type: "verify", needs: [], owns: [], checks: [], maxAttempts: 1 },
+    ],
+  };
+  const state = createInitialState(graph, []);
+  const lifecycle = new RunLifecycle(graph, state);
+
+  lifecycle.startNode("work");
+  const firstId = state.nodes.work!.currentAttemptId!;
+  lifecycle.failNode("work", "first failure", false);
+  state.nodes.work!.evidenceFiles.push(`evidence/${firstId}.json`);
+  lifecycle.retryFrom("work");
+  lifecycle.startNode("work");
+  const secondId = state.nodes.work!.currentAttemptId!;
+  lifecycle.failNode("work", "second failure", false);
+  state.nodes.work!.evidenceFiles.push(`evidence/${secondId}.json`);
+  lifecycle.retryFrom("work");
+  lifecycle.startNode("work");
+  const thirdId = state.nodes.work!.currentAttemptId!;
+
+  assert.equal(new Set([firstId, secondId, thirdId]).size, 3);
+  assert.deepEqual([firstId, secondId, thirdId].map((id) => state.attempts[id]!.ordinal), [1, 2, 3]);
+  assert.deepEqual([firstId, secondId, thirdId].map((id) => state.attempts[id]!.generation), [0, 1, 2]);
+  assert.deepEqual(state.nodes.work!.evidenceFiles, [
+    `evidence/${firstId}.json`,
+    `evidence/${secondId}.json`,
+  ]);
+  assert.equal(state.attempts[firstId]!.status, "superseded");
+  assert.equal(state.attempts[secondId]!.status, "superseded");
+  assert.equal(state.attempts[thirdId]!.status, "running");
 });
 
 test("lifecycle advances dependency-ready nodes to a completed terminal decision", () => {

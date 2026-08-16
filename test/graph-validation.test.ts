@@ -42,6 +42,28 @@ test("validate accepts a well-formed acyclic graph", () => {
   assert.deepEqual(result.topologicalOrder, ["contract", "implementation"]);
 });
 
+test("validate rejects run IDs that can escape or collide in runtime paths", () => {
+  for (const unsafeId of ["../outside", "nested/run", "nested\\run", "bad:name", ".", "CON", "aux.txt", "trailing ", "x".repeat(129)]) {
+    const graph = baseGraph();
+    graph.run.id = unsafeId;
+    assert.match(validateGraph(graph).errors.join("\n"), /run\.id must be a safe cross-platform runtime identifier/);
+  }
+});
+
+test("validate preserves legacy logical IDs containing spaces", () => {
+  const graph = baseGraph();
+  graph.run.id = "my run";
+  graph.nodes[0]!.id = "build app";
+  graph.nodes[1]!.needs = ["build app"];
+  assert.deepEqual(validateGraph(graph).errors, []);
+});
+
+test("validate rejects node IDs that can escape runtime artifact paths", () => {
+  const graph = baseGraph();
+  graph.nodes[0]!.id = "../../outside";
+  assert.match(validateGraph(graph).errors.join("\n"), /id must be a safe runtime identifier/);
+});
+
 test("validate accepts an explicit read-only run advisor", () => {
   const graph = baseGraph();
   graph.run.advisor = {
