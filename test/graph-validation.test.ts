@@ -42,6 +42,103 @@ test("validate accepts a well-formed acyclic graph", () => {
   assert.deepEqual(result.topologicalOrder, ["contract", "implementation"]);
 });
 
+test("validate accepts an explicit read-only run advisor", () => {
+  const graph = baseGraph();
+  graph.run.advisor = {
+    executor: "codex",
+    model: "gpt-5.6-sol",
+    instructions: "Watch architectural boundaries and evidence quality.",
+    stopOnBlocker: true,
+  };
+
+  assert.deepEqual(validateGraph(graph).errors, []);
+});
+
+test("validate rejects unsafe or unknown advisor configuration", () => {
+  const graph = baseGraph();
+  graph.run.advisor = {
+    executor: "claudex",
+    model: "override-not-owned-by-agr",
+  };
+  (graph.run.advisor as unknown as Record<string, unknown>).mode = "executor";
+
+  const errors = validateGraph(graph).errors.join("\n");
+  assert.match(errors, /run\.advisor has unknown property "mode"/);
+  assert.match(errors, /Claudex advisor cannot override the launcher model/);
+
+  (graph.run.advisor as unknown as Record<string, unknown>).executor = "shell";
+  graph.run.advisor.instructions = "x".repeat(4_001);
+  assert.match(
+    validateGraph(graph).errors.join("\n"),
+    /run\.advisor requires a Codex, Claude, or Claudex executor/,
+  );
+  assert.match(validateGraph(graph).errors.join("\n"), /run\.advisor\.instructions must be at most 4000 characters/);
+
+  graph.run.advisor.executor = "codex";
+  graph.run.advisor.model = "";
+  assert.match(validateGraph(graph).errors.join("\n"), /run\.advisor\.model must be a non-empty string/);
+});
+
+test("validate rejects schema-unknown fields instead of silently ignoring them", () => {
+  const graph = baseGraph();
+  (graph.run as unknown as Record<string, unknown>).timeoutMS = 500;
+  (graph.nodes[0] as unknown as Record<string, unknown>).maxAttempt = 2;
+  graph.nodes[0]!.context = { symbols: ["Thing"] };
+  (graph.nodes[0]!.context as unknown as Record<string, unknown>).file = "src/thing.ts";
+
+  const errors = validateGraph(graph).errors.join("\n");
+  assert.match(errors, /run has unknown property "timeoutMS"/);
+  assert.match(errors, /node "contract" has unknown property "maxAttempt"/);
+  assert.match(errors, /node "contract" context has unknown property "file"/);
+});
+
+test("validate rejects schema-invalid field types without throwing", () => {
+  const graph = baseGraph();
+  (graph.run as unknown as Record<string, unknown>).codeGraph = "yes";
+  (graph.nodes[0] as unknown as Record<string, unknown>).timeoutMs = "soon";
+  (graph.nodes[1] as unknown as Record<string, unknown>).needs = "contract";
+
+  const result = validateGraph(graph);
+  assert.match(result.errors.join("\n"), /run.codeGraph must be a boolean/);
+  assert.match(result.errors.join("\n"), /timeoutMs must be a positive integer/);
+  assert.match(result.errors.join("\n"), /needs must be an array/);
+  assert.deepEqual(result.topologicalOrder, []);
+});
+
+test("validate rejects invalid optional field types on every node type", () => {
+  const graph = baseGraph();
+  const verify = graph.nodes[0]!;
+  verify.type = "verify";
+  verify.executor = 0 as never;
+  verify.prompt = 7 as never;
+  verify.target = false as never;
+
+  const errors = validateGraph(graph).errors.join("\n");
+  assert.match(errors, /invalid executor/);
+  assert.match(errors, /prompt must be a string/);
+  assert.match(errors, /target must be a string/);
+});
+
+test("validate does not analyze ownership after an invalid implicitOutputs type", () => {
+  const graph = baseGraph();
+  graph.nodes[1]!.needs = [];
+  (graph.nodes[0] as unknown as Record<string, unknown>).implicitOutputs = 7;
+
+  const result = validateGraph(graph);
+  assert.match(result.errors.join("\n"), /implicitOutputs must contain only strings/);
+  assert.deepEqual(result.topologicalOrder, []);
+});
+
+test("validate does not analyze ownership after non-string ownership patterns", () => {
+  const graph = baseGraph();
+  graph.nodes[1]!.needs = [];
+  (graph.nodes[0] as unknown as Record<string, unknown>).owns = [7];
+
+  const result = validateGraph(graph);
+  assert.match(result.errors.join("\n"), /owns must contain only strings/);
+  assert.deepEqual(result.topologicalOrder, []);
+});
+
 test("validate rejects missing dependencies and cycles", () => {
   const graph = baseGraph();
   graph.nodes[0]!.needs = ["implementation", "missing"];
@@ -120,4 +217,41 @@ test("validate rejects graph-level model overrides for Claudex", () => {
     validateGraph(graph).errors.join("\n"),
     /Claudex node "contract" cannot override the launcher model/,
   );
+});
+
+test("validate restricts required model usage to complete Claudex requirements", () => {
+  const graph = baseGraph();
+  graph.nodes[0]!.requiredModelUsage = [
+    { model: "gpt-5.6-luna", provider: "", contextWindow: 0 },
+  ];
+
+  let errors = validateGraph(graph).errors.join("\n");
+  assert.match(errors, /requiredModelUsage is supported only for Claudex/);
+  assert.match(errors, /requires a model, provider, and positive contextWindow/);
+
+  graph.nodes[0]!.executor = "claudex";
+  graph.nodes[0]!.requiredModelUsage = [
+    { model: "gpt-5.6-luna", provider: "firstParty", contextWindow: 262144 },
+  ];
+  errors = validateGraph(graph).errors.join("\n");
+  assert.equal(errors, "");
+});
+
+test("validate rejects model usage requirements on non-dispatched nodes", () => {
+  for (const type of ["verify", "human_gate"] as const) {
+    const graph = baseGraph();
+    const candidate = graph.nodes[0]!;
+    candidate.type = type;
+    candidate.executor = "claudex";
+    candidate.owns = [];
+    if (type === "human_gate") candidate.target = "approve:model-proof";
+    candidate.requiredModelUsage = [
+      { model: "gpt-5.6-luna", provider: "firstParty", contextWindow: 262144 },
+    ];
+
+    assert.match(
+      validateGraph(graph).errors.join("\n"),
+      /requiredModelUsage requires a dispatched Claudex node/,
+    );
+  }
 });

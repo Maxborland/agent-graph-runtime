@@ -4,6 +4,7 @@ import type {
   RunState,
 } from "./types.js";
 import { graphHash } from "./graph-hash.js";
+import { RunLifecycle } from "./lifecycle.js";
 
 export function createInitialState(
   graph: GraphDefinition,
@@ -30,15 +31,5 @@ export function selectReadyNodes(
   graph: GraphDefinition,
   state: RunState,
 ): GraphNodeDefinition[] {
-  const running = Object.values(state.nodes).filter((node) => node.status === "running").length;
-  const capacity = Math.max(0, graph.run.maxConcurrency - running);
-  return graph.nodes
-    .filter((node) => {
-      const nodeState = state.nodes[node.id];
-      if (!nodeState) return false;
-      if (!["pending", "failed"].includes(nodeState.status)) return false;
-      if (nodeState.attempts >= node.maxAttempts) return false;
-      return node.needs.every((dependency) => state.nodes[dependency]?.status === "accepted");
-    })
-    .slice(0, capacity);
+  return new RunLifecycle(graph, state).readyNodes();
 }

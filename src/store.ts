@@ -3,14 +3,8 @@ import { join } from "node:path";
 
 import { createInitialState } from "./state.js";
 import { graphHash } from "./graph-hash.js";
-import type { GraphDefinition, RunState } from "./types.js";
-
-interface RunEvent {
-  at: string;
-  type: string;
-  nodeId?: string;
-  detail?: string;
-}
+import { RunLifecycle } from "./lifecycle.js";
+import type { GraphDefinition, RunEvent, RunState } from "./types.js";
 
 export class RunStore {
   readonly runDirectory: string;
@@ -19,11 +13,13 @@ export class RunStore {
   readonly evidenceDirectory: string;
   readonly outputsDirectory: string;
   readonly promptsDirectory: string;
+  private eventWriteQueue: Promise<void> = Promise.resolve();
 
   private constructor(
     readonly repositoryRoot: string,
     readonly graph: GraphDefinition,
     public state: RunState,
+    private nextEventSeq: number,
   ) {
     this.runDirectory = join(repositoryRoot, ".agent-graph", "runs", graph.run.id);
     this.statePath = join(this.runDirectory, "state.json");
@@ -57,20 +53,20 @@ export class RunStore {
       state = createInitialState(graph, baselineChangedFiles);
     }
 
-    const store = new RunStore(repositoryRoot, graph, state);
-    let changed = false;
-    for (const [nodeId, node] of Object.entries(store.state.nodes)) {
-      if (node.status !== "running") continue;
-      node.status = "pending";
-      changed = true;
+    const store = new RunStore(
+      repositoryRoot,
+      graph,
+      state,
+      await readNextEventSequence(join(runDirectory, "events.jsonl")),
+    );
+    const recoveryEvents = new RunLifecycle(graph, store.state).recoverInterruptedNodes();
+    for (const event of recoveryEvents) {
       await store.appendEvent({
         at: new Date().toISOString(),
-        type: "node_interrupted",
-        nodeId,
-        detail: "Recovered a node left running by a previous process",
+        ...event,
       });
     }
-    if (changed || !(await fileExists(store.statePath))) await store.save("open");
+    if (recoveryEvents.length > 0 || !(await fileExists(store.statePath))) await store.save("open");
     return store;
   }
 
@@ -82,8 +78,27 @@ export class RunStore {
     await this.appendEvent({ at: this.state.updatedAt, type: "state_saved", detail: reason });
   }
 
-  async appendEvent(event: RunEvent): Promise<void> {
-    await appendFile(this.eventsPath, `${JSON.stringify(event)}\n`, "utf8");
+  async appendEvent(event: Omit<RunEvent, "seq">): Promise<RunEvent> {
+    const persisted = { seq: this.nextEventSeq, ...event };
+    this.nextEventSeq += 1;
+    const write = this.eventWriteQueue.then(() => appendFile(
+      this.eventsPath,
+      `${JSON.stringify(persisted)}\n`,
+      "utf8",
+    ));
+    this.eventWriteQueue = write.catch(() => undefined);
+    await write;
+    return persisted;
+  }
+}
+
+async function readNextEventSequence(path: string): Promise<number> {
+  try {
+    const raw = await readFile(path, "utf8");
+    return raw.split(/\r?\n/).filter(Boolean).length + 1;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 1;
+    throw error;
   }
 }
 

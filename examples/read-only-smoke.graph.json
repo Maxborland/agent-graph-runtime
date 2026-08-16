@@ -3,7 +3,7 @@
   "run": {
     "id": "installed-cli-smoke",
     "objective": "Prove that both installed agent CLIs can inspect this package and return validated structured handoffs",
-    "repository": ".",
+    "repository": "..",
     "maxConcurrency": 1,
     "allowExternalActions": false,
     "codeGraph": false

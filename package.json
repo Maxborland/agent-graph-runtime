@@ -1,6 +1,6 @@
 {
   "name": "@quidni/agent-graph-runtime",
-  "version": "0.2.0",
+  "version": "0.6.0",
   "description": "Local graph runtime for autonomous Codex, Claude Code, and Claudex workflows",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "test": "pnpm run build && node --test dist/test/**/*.test.js",
     "check": "pnpm run test",
     "start": "node dist/src/cli.js"

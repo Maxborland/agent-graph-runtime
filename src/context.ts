@@ -15,10 +15,10 @@ export async function buildCodeContext(
   node: GraphNodeDefinition,
   repositoryRoot: string,
   codeGraphCommand = "codegraph",
+  signal?: AbortSignal,
 ): Promise<CodeContextResult> {
-  if (!node.context) return { available: false, text: "", sources: [] };
   try {
-    const status = await run(codeGraphCommand, ["status", repositoryRoot, "--json"]);
+    const status = await run(codeGraphCommand, ["status", repositoryRoot, "--json"], signal, repositoryRoot);
     const stale = /"(?:stale|needsSync)"\s*:\s*true/i.test(status);
     if (stale) {
       return {
@@ -30,23 +30,35 @@ export async function buildCodeContext(
 
     const sections: string[] = [];
     const sources: string[] = ["codegraph:status"];
-    for (const symbol of node.context.symbols ?? []) {
-      sections.push(`Symbol ${symbol}:\n${await run(codeGraphCommand, ["query", symbol, "-p", repositoryRoot, "-j"])}`);
+    if (!node.context) {
+      sections.push(
+        `CodeGraph exploration:\n${await run(
+          codeGraphCommand,
+          ["explore", node.prompt ?? node.id, "-p", repositoryRoot],
+          signal,
+          repositoryRoot,
+        )}`,
+      );
+      sources.push("codegraph:explore");
+    }
+    const requested = node.context ?? {};
+    for (const symbol of requested.symbols ?? []) {
+      sections.push(`Symbol ${symbol}:\n${await run(codeGraphCommand, ["query", symbol, "-p", repositoryRoot, "-j"], signal, repositoryRoot)}`);
       sources.push(`codegraph:query:${symbol}`);
     }
-    for (const symbol of node.context.impact ?? []) {
-      sections.push(`Impact ${symbol}:\n${await run(codeGraphCommand, ["impact", symbol, "-p", repositoryRoot, "-j"])}`);
+    for (const symbol of requested.impact ?? []) {
+      sections.push(`Impact ${symbol}:\n${await run(codeGraphCommand, ["impact", symbol, "-p", repositoryRoot, "-j"], signal, repositoryRoot)}`);
       sources.push(`codegraph:impact:${symbol}`);
     }
-    if ((node.context.affectedFiles?.length ?? 0) > 0) {
+    if ((requested.affectedFiles?.length ?? 0) > 0) {
       sections.push(
         `Affected tests:\n${await run(codeGraphCommand, [
           "affected",
-          ...(node.context.affectedFiles ?? []),
+          ...(requested.affectedFiles ?? []),
           "-p",
           repositoryRoot,
           "-j",
-        ])}`,
+        ], signal, repositoryRoot)}`,
       );
       sources.push("codegraph:affected");
     }
@@ -65,12 +77,19 @@ export async function buildCodeContext(
   }
 }
 
-async function run(command: string, args: string[]): Promise<string> {
+async function run(
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+  cwd?: string,
+): Promise<string> {
   const { stdout } = await exec(command, args, {
     encoding: "utf8",
     maxBuffer: 2 * 1024 * 1024,
     windowsHide: true,
+    timeout: 30_000,
+    ...(signal ? { signal } : {}),
+    ...(cwd ? { cwd } : {}),
   });
   return stdout.trim();
 }
-

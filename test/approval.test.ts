@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { approveGate } from "../src/approval.js";
+import { OperatorControl } from "../src/operator-control.js";
 import { GraphRunner } from "../src/runner.js";
 import type { GraphDefinition } from "../src/types.js";
 
@@ -45,11 +45,12 @@ test("human gate stops the run until its exact target is approved", async () => 
   try {
     const runner = new GraphRunner(graph, root, {});
     assert.equal((await runner.run()).status, "awaiting_approval");
+    const control = new OperatorControl(graph, root);
     await assert.rejects(
-      approveGate(graph, root, "release-approval", "deploy:staging"),
+      control.approve("release-approval", "deploy:staging"),
       /does not match/,
     );
-    await approveGate(graph, root, "release-approval", "deploy:production");
+    await control.approve("release-approval", "deploy:production");
     const completed = await runner.run();
     assert.equal(completed.status, "completed");
     assert.equal(completed.nodes["release-approval"]!.status, "accepted");
@@ -57,4 +58,3 @@ test("human gate stops the run until its exact target is approved", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
-

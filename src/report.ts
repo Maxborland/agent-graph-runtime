@@ -22,6 +22,15 @@ export async function writeRunReport(store: RunStore, graph: GraphDefinition): P
       `| ${escapeCell(node.id)} | ${state.status} | ${state.attempts} | ${state.evidenceFiles.map(escapeCell).join("<br>") || "—"} | ${escapeCell(state.lastError ?? "—")} |`,
     );
   }
+  if (store.state.advisor?.latest) {
+    const advisor = store.state.advisor.latest;
+    lines.push(
+      "",
+      `Advisor: ${advisor.severity}${store.state.advisor.blocker ? " (acknowledgement required)" : ""}`,
+      `Advisor summary: ${escapeCell(advisor.summary)}`,
+      `Advisor evidence: ${escapeCell(advisor.evidenceFile)}`,
+    );
+  }
   lines.push(
     "",
     "Model handoffs are claims. Acceptance above reflects runtime ownership checks and configured deterministic commands only; user-facing runtime acceptance must be an explicit graph node.",
@@ -35,4 +44,3 @@ export async function writeRunReport(store: RunStore, graph: GraphDefinition): P
 function escapeCell(value: string): string {
   return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
-
