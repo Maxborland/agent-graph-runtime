@@ -1,8 +1,8 @@
 # Agent Graph Runtime — target architecture
 
-Status: proposed target architecture. This document describes intended future
-behavior and does not override the implemented v0.6 contract in
-[`SPEC.md`](SPEC.md).
+Status: implemented local-first architecture on the current branch. Observable
+v1.0 acceptance is governed by [`V1.0-DELIVERY-SPEC.md`](V1.0-DELIVERY-SPEC.md);
+this status does not imply npm publication or hosted deployment.
 
 ## Product boundary
 
@@ -354,7 +354,7 @@ interface LeaseStore {
 }
 ```
 
-Planned implementations:
+Implementations and deliberate boundary:
 
 1. filesystem artifacts and versioned JSON/event files during v0.7 migration;
 2. coordinator-owned SQLite with WAL for local and multi-worker execution;
@@ -373,7 +373,7 @@ may declare named leases:
 {
   "resources": [
     { "name": "browser:profile:default", "mode": "exclusive" },
-    { "name": "provider:claudex", "mode": "shared", "limit": 2 }
+    { "name": "provider:claudex", "mode": "shared" }
   ]
 }
 ```
@@ -412,8 +412,8 @@ Until the user configures retention, the safe default is manual pruning:
 - state, events, approval receipts, and Git lineage are retained;
 - failed runs and external-action evidence are never auto-pruned;
 - raw executor output remains local and access-restricted;
-- `agr retention plan` previews eligible data;
-- `agr prune --dry-run` is required before explicit deletion;
+- `agr retention plan --json` produces the exact reviewable plan;
+- `agr retention prune --plan FILE --execute` accepts only that hashed plan;
 - pruning retains a minimal manifest with hashes, lineage, deletion time, and
   policy reason.
 

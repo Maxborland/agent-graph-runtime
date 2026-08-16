@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { CliError } from "./cli-error.js";
 import { inspectRunLock } from "./run-lock.js";
 import { readCurrentGeneration } from "./persistence.js";
+import { readSqliteRunProjection } from "./sqlite-coordinator.js";
 import { assertSafeRunId } from "./run-id.js";
 import type { RunEvent, RunState } from "./types.js";
 
@@ -277,6 +278,8 @@ export class RunObserver {
 
 export async function readRunStateArtifact(repositoryRoot: string, runId: string): Promise<RunState> {
   try {
+    const sqlite = await readSqliteRunProjection(repositoryRoot, runId);
+    if (sqlite) return JSON.parse(sqlite.stateRaw) as RunState;
     const root = runRoot(repositoryRoot, runId);
     const current = await readCurrentGeneration(root);
     return JSON.parse(
@@ -292,6 +295,8 @@ export async function readRunStateArtifact(repositoryRoot: string, runId: string
 
 export async function readRunEventArtifact(repositoryRoot: string, runId: string): Promise<RunEvent[]> {
   try {
+    const sqlite = await readSqliteRunProjection(repositoryRoot, runId);
+    if (sqlite) return parseRunEventLog(sqlite.eventsRaw);
     const root = runRoot(repositoryRoot, runId);
     const current = await readCurrentGeneration(root);
     return parseRunEventLog(

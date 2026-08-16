@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "run": {
+    "id": "adaptive-local-example",
+    "objective": "Produce and verify a bounded local artifact",
+    "repository": ".",
+    "maxConcurrency": 2,
+    "budgets": {
+      "maxNodes": 4,
+      "maxDepth": 3,
+      "maxDurationMs": 120000,
+      "maxProviderCalls": 1
+    },
+    "providerConcurrency": {
+      "shell": 1
+    },
+    "automaticPolicy": {
+      "allowReversiblePatches": true
+    }
+  },
+  "nodes": [
+    {
+      "id": "produce",
+      "type": "verify",
+      "needs": [],
+      "owns": [".agent-graph-example.txt"],
+      "checks": ["node -e \"require('node:fs').writeFileSync('.agent-graph-example.txt','verified\\n')\""],
+      "maxAttempts": 1,
+      "timeoutMs": 30000,
+      "resources": [
+        { "name": "example-file", "mode": "exclusive" }
+      ],
+      "produces": [
+        { "name": "example", "type": "text/plain", "path": ".agent-graph-example.txt" }
+      ]
+    },
+    {
+      "id": "consume",
+      "type": "verify",
+      "needs": ["produce"],
+      "owns": [],
+      "checks": ["node -e \"if(require('node:fs').readFileSync('.agent-graph-example.txt','utf8')!=='verified\\n')process.exit(1)\""],
+      "maxAttempts": 1,
+      "timeoutMs": 30000,
+      "consumes": [
+        { "name": "example", "type": "text/plain", "from": "produce" }
+      ]
+    }
+  ]
+}

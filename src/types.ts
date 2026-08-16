@@ -16,6 +16,40 @@ export interface GraphRunDefinition {
   allowExternalActions?: boolean;
   codeGraph?: boolean;
   advisor?: AdvisorDefinition;
+  budgets?: RunBudgets;
+  providerConcurrency?: Partial<Record<ExecutorName, number>>;
+  automaticPolicy?: AutomaticPolicyDefinition;
+}
+
+export interface RunBudgets {
+  maxNodes: number;
+  maxDepth: number;
+  maxDurationMs: number;
+  maxProviderCalls: number;
+  maxCostUsd?: number;
+}
+
+export interface AutomaticPolicyDefinition {
+  allowReversiblePatches?: boolean;
+  allowedActionTypes?: string[];
+}
+
+export interface ResourceClaim {
+  name: string;
+  mode: "shared" | "exclusive";
+  units?: number;
+}
+
+export interface ProducedArtifactContract {
+  name: string;
+  type: string;
+  path: string;
+}
+
+export interface ConsumedArtifactContract {
+  name: string;
+  type: string;
+  from: string;
 }
 
 export interface AdvisorDefinition {
@@ -39,6 +73,13 @@ export interface GraphNodeDefinition {
   timeoutMs?: number;
   model?: string;
   requiredModelUsage?: RequiredModelUsage[];
+  produces?: ProducedArtifactContract[];
+  consumes?: ConsumedArtifactContract[];
+  resources?: ResourceClaim[];
+  capabilities?: string[];
+  estimatedCostUsd?: number;
+  reversible?: boolean;
+  placement?: "local" | "remote";
   context?: {
     symbols?: string[];
     impact?: string[];
@@ -100,6 +141,22 @@ export interface ArtifactRef {
   localPath: string;
 }
 
+export interface ArtifactLineageRecord {
+  schemaVersion: 1;
+  artifactId: string;
+  name: string;
+  type: string;
+  sha256: string;
+  size: number;
+  sourcePath: string;
+  contentPath: string;
+  producerNodeId: string;
+  producerAttemptId: string;
+  planRevisionId: string;
+  lineage: string[];
+  recordedAt: string;
+}
+
 export interface AttemptRecord {
   schemaVersion: 1;
   attemptId: string;
@@ -117,7 +174,7 @@ export interface AttemptRecord {
 export interface ApprovalReceipt {
   schemaVersion: 1;
   approvalId: string;
-  issuedBy: "human";
+  issuedBy: "human" | "policy";
   gateNodeId: string;
   actionNodeId: string;
   target: string;
@@ -165,6 +222,8 @@ export interface RunMandate {
   maxNodes: number;
   maxDepth: number;
   maxDurationMs: number;
+  maxProviderCalls?: number;
+  maxCostUsd?: number;
   policyHash: string;
   issuedAt: string;
 }
@@ -237,6 +296,22 @@ export interface PlanRevisionRecord {
   runId: string;
   graphHash: string;
   createdAt: string;
+  parentRevisionId?: string;
+  patchId?: string;
+  graph?: GraphDefinition;
+}
+
+export interface GraphPatchRecord {
+  schemaVersion: 1;
+  patchId: string;
+  runId: string;
+  parentRevisionId: string;
+  proposer: string;
+  rationale: string;
+  proposedGraphHash: string;
+  proposedGraph: GraphDefinition;
+  reversible: boolean;
+  proposedAt: string;
 }
 
 export type RunStatus = "running" | "completed" | "failed" | "needs_attention" | "awaiting_approval" | "cancelled";
@@ -256,6 +331,11 @@ export interface RunState {
   nodes: Record<string, NodeRunState>;
   attempts: Record<string, AttemptRecord>;
   authority: AuthorityState;
+  artifactLineage?: ArtifactLineageRecord[];
+  executionAccounting?: {
+    providerCalls: number;
+    costUsd: number;
+  };
   git?: GitTransactionState;
   advisor?: AdvisorRunState;
 }

@@ -941,3 +941,73 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", struct
     }
   },
 );
+
+test("CLI exposes SQLite, worker enrollment, retention, and verified export journeys", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-cli-v1-"));
+  const graphPath = join(root, "graph.json");
+  const exportPath = join(root, "portable-export");
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await writeFile(graphPath, JSON.stringify({
+    version: 1,
+    run: { id: "cli-v1", objective: "v1 journey", repository: ".", maxConcurrency: 1 },
+    nodes: [{ id: "verify", type: "verify", needs: [], owns: [], checks: [], maxAttempts: 1 }],
+  }), "utf8");
+  const cli = resolve("dist/src/cli.js");
+  try {
+    await exec(process.execPath, [cli, "run", graphPath], { cwd: root, encoding: "utf8" });
+    const migrated = await exec(process.execPath, [cli, "storage", "migrate", graphPath, "--json"], { cwd: root, encoding: "utf8" });
+    assert.match(migrated.stdout, /sourceManifestHash/);
+    const enrollment = await exec(process.execPath, [cli, "worker", "enroll", graphPath, "--executors", "codex", "--resources", "gpu", "--json"], { cwd: root, encoding: "utf8" });
+    const enrolled = JSON.parse(enrollment.stdout) as { workerId: string; token: string };
+    assert.ok(enrolled.workerId && enrolled.token);
+    const workers = await exec(process.execPath, [cli, "worker", "list", graphPath, "--json"], { cwd: root, encoding: "utf8" });
+    assert.equal((JSON.parse(workers.stdout) as unknown[]).length, 1);
+    const retention = await exec(process.execPath, [cli, "retention", "plan", graphPath, "--older-than-ms", "1", "--json"], { cwd: root, encoding: "utf8" });
+    assert.ok(Array.isArray((JSON.parse(retention.stdout) as { removable: unknown[] }).removable));
+    const retentionPlanPath = join(root, "retention-plan.json");
+    await writeFile(retentionPlanPath, retention.stdout, "utf8");
+    const pruned = await exec(process.execPath, [cli, "retention", "prune", graphPath, "--plan", retentionPlanPath, "--execute", "--json"], { cwd: root, encoding: "utf8" });
+    assert.ok(Array.isArray((JSON.parse(pruned.stdout) as { removed: unknown[] }).removed));
+    await exec(process.execPath, [cli, "export", "cli-v1", exportPath, graphPath], { cwd: root, encoding: "utf8" });
+    const verified = await exec(process.execPath, [cli, "verify-export", exportPath, "--json"], { cwd: root, encoding: "utf8" });
+    assert.equal((JSON.parse(verified.stdout) as { valid: boolean }).valid, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CLI proposes and activates an immutable graph patch for the next wave", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-cli-patch-"));
+  const graphPath = join(root, "graph.json");
+  const proposedPath = join(root, "proposed.json");
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  const graph = {
+    version: 1 as const,
+    run: {
+      id: "cli-patch", objective: "patch safely", repository: ".", maxConcurrency: 1,
+      budgets: { maxNodes: 3, maxDepth: 3, maxDurationMs: 3_600_000, maxProviderCalls: 1 },
+    },
+    nodes: [
+      { id: "first", type: "verify" as const, needs: [], owns: [], checks: [], maxAttempts: 1, timeoutMs: 10_000 },
+      { id: "gate", type: "human_gate" as const, target: "local:review", needs: ["first"], owns: [], checks: [], maxAttempts: 1 },
+    ],
+  };
+  const proposed = structuredClone(graph);
+  proposed.nodes.splice(1, 0, { id: "second", type: "verify", needs: ["first"], owns: [], checks: [], maxAttempts: 1, timeoutMs: 10_000 } as typeof proposed.nodes[number]);
+  proposed.nodes.find((node) => node.id === "gate")!.needs = ["second"];
+  await writeFile(graphPath, JSON.stringify(graph), "utf8");
+  await writeFile(proposedPath, JSON.stringify(proposed), "utf8");
+  const cli = resolve("dist/src/cli.js");
+  try {
+    await assert.rejects(exec(process.execPath, [cli, "run", graphPath], { cwd: root, encoding: "utf8" }), (error: unknown) => (error as { code?: number }).code === 2);
+    const proposal = await exec(process.execPath, [cli, "patch", "propose", proposedPath, graphPath, "--rationale", "add second verification", "--json"], { cwd: root, encoding: "utf8" });
+    const patchId = (JSON.parse(proposal.stdout) as { patchId: string }).patchId;
+    await exec(process.execPath, [cli, "patch", "activate", patchId, graphPath], { cwd: root, encoding: "utf8" });
+    await assert.rejects(exec(process.execPath, [cli, "run", graphPath, "--json"], { cwd: root, encoding: "utf8" }), (error: unknown) => {
+      const state = JSON.parse((error as { stdout?: string }).stdout ?? "{}") as { status?: string; nodes?: Record<string, { status: string }> };
+      assert.equal(state.status, "awaiting_approval");
+      assert.equal(state.nodes?.second?.status, "accepted");
+      return true;
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

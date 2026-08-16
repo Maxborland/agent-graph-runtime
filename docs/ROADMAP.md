@@ -1,8 +1,9 @@
 # Agent Graph Runtime — implementation roadmap
 
-Status: v0.7 implemented on the current branch; v0.8-v1.0 proposed. This
-roadmap sequences target capabilities behind evidence gates. Version labels
-express dependency order, not delivery dates.
+Status: v0.7-v1.0 implemented and technically verified on the current branch;
+the final independent review passed with no remaining P0-P2 blockers and is tracked by
+[`V1.0-DELIVERY-SPEC.md`](V1.0-DELIVERY-SPEC.md). This is not an npm release,
+merge, or hosted deployment claim.
 
 ## Roadmap rules
 
@@ -91,6 +92,8 @@ or reverted explicitly without touching unrelated user work.
 
 ## v0.8 — Governed adaptive local graph
 
+Status: implemented on the current branch.
+
 ### Outcome
 
 The local coordinator can accept evidence-backed graph expansion proposals
@@ -154,6 +157,9 @@ authority and resource budgets.
 
 ## v0.9 — Self-hosted distributed scheduler
 
+Status: implemented on the current branch with coordinator-owned SQLite and
+user-controlled workers. PostgreSQL is deliberately not added without evidence.
+
 ### Outcome
 
 One local coordinator can dispatch repository attempts to registered
@@ -214,6 +220,8 @@ only coordinator-verified results.
 - Local-only execution remains supported without a coordinator network service.
 
 ## v1.0 — Autonomous local control plane
+
+Status: implemented on the current branch; final independent review pending.
 
 ### Outcome
 

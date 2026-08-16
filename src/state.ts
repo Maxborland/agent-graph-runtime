@@ -30,6 +30,8 @@ export function createInitialState(
     updatedAt: now,
     baselineChangedFiles: [...baselineChangedFiles],
     attempts: {},
+    artifactLineage: [],
+    executionAccounting: { providerCalls: 0, costUsd: 0 },
     authority: {
       schemaVersion: 1,
       mandate: createRunMandate(graph, hash, now),
@@ -58,9 +60,11 @@ export function createRunMandate(graph: GraphDefinition, hash: string, issuedAt:
     planRevisionId: `plan-${hash.slice(0, 24)}`,
     allowedActions,
     allowedTargets,
-    maxNodes: graph.nodes.length,
-    maxDepth: graphDepth(graph),
-    maxDurationMs: graph.nodes.reduce((total, node) => total + (node.timeoutMs ?? 20 * 60_000), 0),
+    maxNodes: graph.run.budgets?.maxNodes ?? graph.nodes.length,
+    maxDepth: graph.run.budgets?.maxDepth ?? graphDepth(graph),
+    maxDurationMs: graph.run.budgets?.maxDurationMs ?? graph.nodes.reduce((total, node) => total + (node.timeoutMs ?? 20 * 60_000), 0),
+    ...(graph.run.budgets?.maxProviderCalls === undefined ? {} : { maxProviderCalls: graph.run.budgets.maxProviderCalls }),
+    ...(graph.run.budgets?.maxCostUsd === undefined ? {} : { maxCostUsd: graph.run.budgets.maxCostUsd }),
     policyHash: hash,
     issuedAt,
   };

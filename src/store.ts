@@ -15,6 +15,7 @@ import {
 } from "./persistence.js";
 import { parseRunEventLog } from "./observation.js";
 import { assertSafeRunId } from "./run-id.js";
+import { CoordinatorDatabase, markSqlitePostCutoverMutation, readSqliteRunProjection } from "./sqlite-coordinator.js";
 import type { AttemptRecord, GraphDefinition, NodeRunState, RunEvent, RunState } from "./types.js";
 
 const exec = promisify(execFile);
@@ -33,6 +34,8 @@ export class RunStore {
     public state: RunState,
     private events: RunEvent[],
     private nextEventSeq: number,
+    private sqliteDatabasePath?: string,
+    private sqliteStorageRevision?: number,
   ) {
     this.runDirectory = join(repositoryRoot, ".agent-graph", "runs", graph.run.id);
     this.evidenceDirectory = join(this.runDirectory, "evidence");
@@ -60,66 +63,60 @@ export class RunStore {
     await mkdir(join(runDirectory, "outputs"), { recursive: true });
     await mkdir(join(runDirectory, "prompts"), { recursive: true });
 
+    const sqliteProjection = await readSqliteRunProjection(repositoryRoot, graph.run.id);
     let currentGeneration: LoadedGeneration | undefined;
-    try {
-      currentGeneration = await readCurrentGeneration(runDirectory);
-    } catch (error) {
-      currentGeneration = await recoverJournaledGeneration(runDirectory).catch(() => {
-        throw new Error(`current run generation is invalid and cannot be recovered: ${messageOf(error)}`);
-      });
-    }
-    currentGeneration ??= await recoverJournaledGeneration(runDirectory);
     let state: RunState;
     let events: RunEvent[];
-    if (currentGeneration) {
-      state = parseVersionedState(currentGeneration.stateRaw, graph);
-      events = parseRunEventLog(currentGeneration.eventsRaw);
+    if (sqliteProjection) {
+      state = parseVersionedState(sqliteProjection.stateRaw, graph);
+      events = parseRunEventLog(sqliteProjection.eventsRaw);
       validateStateEventCoherence(state, events);
-      if (state.runId !== graph.run.id) throw new Error("stored run ID does not match graph");
-      if (
-        await canonicalPath(state.repository.root) !== canonicalRoot ||
-        await canonicalPath(state.repository.repositoryId) !== canonicalRoot
-      ) {
-        throw new Error("stored run repository identity does not match the current repository root");
+    } else {
+      try {
+        currentGeneration = await readCurrentGeneration(runDirectory);
+      } catch (error) {
+        currentGeneration = await recoverJournaledGeneration(runDirectory).catch(() => {
+          throw new Error(`current run generation is invalid and cannot be recovered: ${messageOf(error)}`);
+        });
       }
-      if (state.graphHash !== graphHash(graph)) {
-        throw new Error(
-          "stored graph does not match the current graph; use a new run.id or restore the original graph",
+      currentGeneration ??= await recoverJournaledGeneration(runDirectory);
+      if (currentGeneration) {
+        state = parseVersionedState(currentGeneration.stateRaw, graph);
+        events = parseRunEventLog(currentGeneration.eventsRaw);
+        validateStateEventCoherence(state, events);
+      } else try {
+        const legacyStateRaw = await readFile(join(runDirectory, "state.json"), "utf8");
+        const legacyState = JSON.parse(legacyStateRaw) as Partial<RunState>;
+        if (legacyState.schemaVersion !== undefined) {
+          throw new Error(
+            "versioned run projection has no authoritative CURRENT.json or recoverable journal",
+          );
+        }
+        state = upgradeLegacyState(
+          legacyState,
+          graph,
+          canonicalRoot,
+          await repositoryBaseCommit(repositoryRoot),
         );
+        const legacyEventsRaw = await readOptionalFile(join(runDirectory, "events.jsonl"));
+        events = parseRunEventLog(legacyEventsRaw).map((event) => ({ ...event, schemaVersion: 2 }));
+        state.lastAppliedEventSeq = events.at(-1)?.seq ?? 0;
+        await preserveLegacyArtifacts(runDirectory, legacyStateRaw, legacyEventsRaw, state);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        state = createInitialState(graph, baselineChangedFiles, {
+          repositoryId: canonicalRoot,
+          root: canonicalRoot,
+          baseCommit: await repositoryBaseCommit(repositoryRoot),
+        });
+        events = [];
       }
-    } else try {
-      const legacyStateRaw = await readFile(join(runDirectory, "state.json"), "utf8");
-      const legacyState = JSON.parse(legacyStateRaw) as Partial<RunState>;
-      if (legacyState.schemaVersion !== undefined) {
-        throw new Error(
-          "versioned run projection has no authoritative CURRENT.json or recoverable journal",
-        );
-      }
-      state = upgradeLegacyState(
-        legacyState,
-        graph,
-        canonicalRoot,
-        await repositoryBaseCommit(repositoryRoot),
-      );
-      const legacyEventsRaw = await readOptionalFile(join(runDirectory, "events.jsonl"));
-      events = parseRunEventLog(legacyEventsRaw).map((event) => ({ ...event, schemaVersion: 2 }));
-      state.lastAppliedEventSeq = events.at(-1)?.seq ?? 0;
-      await preserveLegacyArtifacts(runDirectory, legacyStateRaw, legacyEventsRaw, state);
-      if (state.runId !== graph.run.id) throw new Error("stored run ID does not match graph");
-      if (state.graphHash !== graphHash(graph)) {
-        throw new Error(
-          "stored graph does not match the current graph; use a new run.id or restore the original graph",
-        );
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      state = createInitialState(graph, baselineChangedFiles, {
-        repositoryId: canonicalRoot,
-        root: canonicalRoot,
-        baseCommit: await repositoryBaseCommit(repositoryRoot),
-      });
-      events = [];
     }
+    if (state.runId !== graph.run.id) throw new Error("stored run ID does not match graph");
+    if (await canonicalPath(state.repository.root) !== canonicalRoot || await canonicalPath(state.repository.repositoryId) !== canonicalRoot) {
+      throw new Error("stored run repository identity does not match the current repository root");
+    }
+    if (state.graphHash !== graphHash(graph)) throw new Error("stored graph does not match the current graph; use a new run.id or restore the original graph");
     await ensureBasePlanRevision(runDirectory, state);
 
     const store = new RunStore(
@@ -128,6 +125,8 @@ export class RunStore {
       state,
       events,
       (events.at(-1)?.seq ?? 0) + 1,
+      sqliteProjection?.databasePath,
+      sqliteProjection?.storageRevision,
     );
     store.currentGeneration = currentGeneration;
     const recoveryEvents = new RunLifecycle(graph, store.state).recoverInterruptedNodes();
@@ -137,7 +136,7 @@ export class RunStore {
         ...event,
       });
     }
-    if (recoveryEvents.length > 0 || !store.currentGeneration) await store.save("open");
+    if (recoveryEvents.length > 0 || (!store.currentGeneration && !sqliteProjection)) await store.save("open");
     return store;
   }
 
@@ -175,6 +174,18 @@ export class RunStore {
   }
 
   private async persist(): Promise<void> {
+    if (this.sqliteDatabasePath !== undefined && this.sqliteStorageRevision !== undefined) {
+      const stateRaw = `${JSON.stringify(this.state, null, 2)}\n`;
+      const eventsRaw = this.events.map((event) => JSON.stringify(event)).join("\n") + (this.events.length > 0 ? "\n" : "");
+      const database = new CoordinatorDatabase(this.sqliteDatabasePath);
+      try {
+        this.sqliteStorageRevision = database.saveRunProjection(this.state.runId, this.sqliteStorageRevision, stateRaw, eventsRaw);
+      } finally { database.close(); }
+      await markSqlitePostCutoverMutation(this.repositoryRoot, this.state.runId);
+      await writeFile(join(this.runDirectory, "state.json"), stateRaw, "utf8");
+      await writeFile(join(this.runDirectory, "events.jsonl"), eventsRaw, "utf8");
+      return;
+    }
     this.currentGeneration = await publishGeneration(
       this.runDirectory,
       this.state,

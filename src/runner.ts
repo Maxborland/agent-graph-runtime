@@ -8,12 +8,16 @@ import {
   repositoryFingerprint,
   requireUsableReceipt,
   reserveApproval,
+  tryIssuePolicyApprovalReceipt,
+  policyApprovalEligible,
 } from "./authority.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { buildCodeContext } from "./context.js";
 import { validateGraph } from "./graph.js";
 import { digestAcceptedEvidence, GitRunTransaction } from "./git-transaction.js";
 import { verifyRunEvidenceArtifacts } from "./evidence.js";
+import { ArtifactCatalog } from "./artifact-lineage.js";
+import { ResourceScheduler, type ResourceLease } from "./resource-scheduler.js";
 import {
   findUnexpectedChanges,
   gitChangedFiles,
@@ -28,6 +32,9 @@ import { sha256 } from "./persistence.js";
 import { RunStore } from "./store.js";
 import { createNodeProgressChannel, type NodeProgressMilestone } from "./node-progress.js";
 import { readRunStateArtifact } from "./observation.js";
+import { activateNextAutomaticPatch, resolveActivePlanGraph } from "./run-plan.js";
+import { repositorySnapshotHash } from "./repository-snapshot.js";
+import type { DistributedCoordinator } from "./distributed-coordinator.js";
 import type {
   AdapterResult,
   AdvisorObservation,
@@ -73,6 +80,7 @@ export interface GraphRunnerOptions {
   onProgress?: (event: RunProgressEvent) => void;
   verbose?: boolean;
   signal?: AbortSignal;
+  remoteCoordinator?: DistributedCoordinator;
 }
 
 interface NodeOutcome {
@@ -91,17 +99,20 @@ export class GraphRunner {
   private readonly pendingEventWrites = new Set<Promise<unknown>>();
   private executionRoot: string;
   private transaction: GitRunTransaction | undefined;
+  private readonly baseGraph: GraphDefinition;
 
   constructor(
-    private readonly graph: GraphDefinition,
+    private graph: GraphDefinition,
     private readonly repositoryRoot: string,
     private readonly adapters: AgentAdapters,
     private readonly options: GraphRunnerOptions = {},
   ) {
     this.executionRoot = repositoryRoot;
+    this.baseGraph = graph;
   }
 
   async run(): Promise<RunState> {
+    this.graph = await resolveActivePlanGraph(this.repositoryRoot, this.baseGraph);
     const validation = validateGraph(this.graph);
     if (validation.errors.length > 0) {
       throw new Error(`Invalid graph:\n- ${validation.errors.join("\n- ")}`);
@@ -129,6 +140,7 @@ export class GraphRunner {
       return this.cancelRun(cancelledStore);
     }
     const store = await RunStore.open(this.repositoryRoot, this.graph, currentBaseline);
+    await this.options.remoteCoordinator?.reconcileGraphPending(this.graph, this.executionRoot);
     if (this.transaction && !store.state.git) {
       store.state.repository = {
         ...store.state.repository,
@@ -145,7 +157,19 @@ export class GraphRunner {
       };
       await store.save("git-transaction-created");
     }
-    const lifecycle = new RunLifecycle(this.graph, store.state);
+    let lifecycle = new RunLifecycle(this.graph, store.state);
+    const resourceScheduler = new ResourceScheduler({
+      maxConcurrency: this.graph.run.maxConcurrency,
+      ...(this.graph.run.providerConcurrency === undefined ? {} : { providerConcurrency: this.graph.run.providerConcurrency }),
+      ...(this.graph.run.budgets ? {
+        budgets: {
+          maxProviderCalls: this.graph.run.budgets.maxProviderCalls,
+          ...(this.graph.run.budgets.maxCostUsd === undefined ? {} : { maxCostUsd: this.graph.run.budgets.maxCostUsd }),
+          deadlineAt: Date.parse(store.state.createdAt) + this.graph.run.budgets.maxDurationMs,
+        },
+      } : {}),
+      initialAccounting: store.state.executionAccounting ?? { providerCalls: 0, costUsd: 0 },
+    });
     const advisor = new PassiveAdvisor(this.graph, this.executionRoot, this.adapters, {
       ...(this.options.signal === undefined ? {} : { signal: this.options.signal }),
       ...(this.options.verbose === undefined ? {} : { verbose: this.options.verbose }),
@@ -154,6 +178,11 @@ export class GraphRunner {
     await store.appendEvent({ at: new Date().toISOString(), ...lifecycle.resumeRun() });
     while (true) {
       if (this.options.signal?.aborted) return this.cancelRun(store);
+      const activatedGraph = await activateNextAutomaticPatch(this.baseGraph, store);
+      if (activatedGraph) {
+        this.graph = activatedGraph;
+        lifecycle = new RunLifecycle(this.graph, store.state);
+      }
       if (lifecycle.acceptApprovedGates()) await store.save("approved-gates");
       if (lifecycle.attentionRequired()) {
         const event = lifecycle.requireAttention();
@@ -165,6 +194,21 @@ export class GraphRunner {
       }
       const gate = lifecycle.readyUnapprovedGate();
       if (gate) {
+        const policyReceipt = policyApprovalEligible(this.graph, gate.id)
+          ? tryIssuePolicyApprovalReceipt(
+              this.graph,
+              store.state,
+              gate.id,
+              await repositoryFingerprint(store.state.repository.worktreePath ?? this.executionRoot),
+            )
+          : undefined;
+        if (policyReceipt) {
+          store.state.authority.receipts.push(policyReceipt);
+          const event = lifecycle.approveGate(gate.id, policyReceipt.target);
+          await store.appendEvent({ at: policyReceipt.issuedAt, ...event, detail: `${policyReceipt.target} (deterministic policy)` });
+          await store.save("policy-approval-recorded");
+          continue;
+        }
         const event = lifecycle.awaitApproval(gate.id);
         await store.appendEvent({
           at: new Date().toISOString(),
@@ -180,10 +224,29 @@ export class GraphRunner {
         return store.state;
       }
 
-      const ready = lifecycle.readyNodes().filter(
+      const candidates = lifecycle.readyNodes().filter(
         (node) => node.type !== "human_gate",
       );
+      const remoteCandidate = candidates.find((node) => node.placement === "remote");
+      const dispatchCandidates = remoteCandidate ? [remoteCandidate] : candidates;
+      const waveResourceLeases: ResourceLease[] = [];
+      const ready = dispatchCandidates.filter((node) => {
+        let lease: ResourceLease | undefined;
+        try {
+          lease = resourceScheduler.tryAcquire(node, `wave:${node.id}`);
+        } catch (error) {
+          const nodeState = store.state.nodes[node.id]!;
+          nodeState.retryBlocked = true;
+          nodeState.lastError = `scheduler denied dispatch: ${messageOf(error)}`;
+          return false;
+        }
+        if (!lease) return false;
+        waveResourceLeases.push(lease);
+        return true;
+      });
+      store.state.executionAccounting = resourceScheduler.snapshot();
       if (ready.length === 0) {
+        for (const lease of waveResourceLeases) lease.release();
         const terminalEvent = lifecycle.finishWhenIdle();
         await this.drainEventWrites();
         await store.save("terminal");
@@ -264,6 +327,7 @@ export class GraphRunner {
       } finally {
         clearInterval(heartbeat);
         this.options.signal?.removeEventListener("abort", forwardExternalAbort);
+        for (const lease of waveResourceLeases) lease.release();
       }
       if (this.options.signal?.aborted) return this.cancelRun(store, outcomes);
       const waveOwnership = [
@@ -351,6 +415,15 @@ export class GraphRunner {
 
     let externalDispatchStarted = false;
     try {
+      const catalog = new ArtifactCatalog(store.runDirectory, this.executionRoot);
+      for (const contract of node.consumes ?? []) {
+        const producerAttemptId = store.state.nodes[contract.from]?.acceptedAttemptId;
+        const record = [...(store.state.artifactLineage ?? [])].reverse().find((candidate) =>
+          candidate.name === contract.name && candidate.producerNodeId === contract.from && candidate.producerAttemptId === producerAttemptId
+        );
+        if (!record) throw new Error(`required typed artifact "${contract.name}" from "${contract.from}" is missing`);
+        await catalog.verifyConsumption(contract, record);
+      }
       if (node.type === "verify") {
         const checks = await runChecks(this.executionRoot, node.checks, timeoutMs, signal);
         return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError)) };
@@ -383,6 +456,45 @@ export class GraphRunner {
         });
         await store.save("approval-consumed");
         externalDispatchStarted = true;
+      }
+      if (node.placement === "remote") {
+        if (!this.options.remoteCoordinator) throw new Error("remote node requires agr run --workers CONFIG");
+        if (!node.executor || node.executor === "shell") throw new Error("remote node requires a model executor");
+        const result = await this.options.remoteCoordinator.dispatchAndAccept({
+          node,
+          envelope: {
+            schemaVersion: 1,
+            attemptId: currentAttemptId(store.state, node.id),
+            runId: this.graph.run.id,
+            nodeId: node.id,
+            planRevisionId: store.state.activePlanRevisionId,
+            repositorySnapshotHash: await repositorySnapshotHash(this.executionRoot),
+            requiredCapabilities: [
+              `executor:${node.executor}`,
+              ...(node.resources ?? []).map((claim) => `resource:${claim.name}`),
+              ...(node.capabilities ?? []).map((capability) => `capability:${capability}`),
+            ],
+            externalAction: false,
+          },
+          worktree: this.executionRoot,
+          payload: { executor: node.executor, prompt },
+          leaseTtlMs: timeoutMs,
+        });
+        const adapterResult: AdapterResult = {
+          handoff: {
+            status: result.status,
+            summary: result.summary,
+            changedFiles: result.patch.files.map((file) => file.path),
+            verification: ["coordinator verified fenced remote worker result"],
+            gaps: result.status === "complete" ? [] : [`remote worker reported ${result.status}`],
+          },
+          stdout: "",
+          stderr: "",
+          exitCode: 0,
+          ...(result.modelUsage === undefined ? {} : { modelUsage: result.modelUsage }),
+        };
+        const checks = await runChecks(this.executionRoot, node.checks, timeoutMs, signal);
+        return { node, prompt, adapterResult, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError)) };
       }
       if (node.executor === "shell") {
         const checks = await runChecks(this.executionRoot, node.checks, timeoutMs, signal);
@@ -473,6 +585,29 @@ export class GraphRunner {
       : undefined;
     const semanticAttention = outcome.adapterResult?.handoff.status === "partial" ||
       outcome.adapterResult?.handoff.status === "blocked";
+    const artifactFailures: string[] = [];
+    const producedArtifacts = [];
+    if (!outcome.error && !handoffFailure && waveEscapedPaths.length === 0 && claimedEscapes.length === 0 && failedChecks.length === 0 && modelUsageFailures.length === 0) {
+      const catalog = new ArtifactCatalog(store.runDirectory, this.executionRoot);
+      const lineage = (outcome.node.consumes ?? []).flatMap((contract) =>
+        (store.state.artifactLineage ?? []).filter((record) =>
+          record.name === contract.name && record.producerNodeId === contract.from &&
+          record.producerAttemptId === store.state.nodes[contract.from]?.acceptedAttemptId
+        ).map((record) => record.sha256)
+      );
+      for (const contract of outcome.node.produces ?? []) {
+        try {
+          producedArtifacts.push(await catalog.record(contract, {
+            producerNodeId: outcome.node.id,
+            producerAttemptId: currentAttemptId(store.state, outcome.node.id),
+            planRevisionId: store.state.activePlanRevisionId,
+            lineage,
+          }));
+        } catch (error) {
+          artifactFailures.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+    }
     const failures = [
       outcome.error,
       handoffFailure,
@@ -483,6 +618,7 @@ export class GraphRunner {
         : undefined,
       ...outcome.checks.flatMap((check) => check.terminationError ? [`unconfirmed check process-tree termination: ${check.terminationError}`] : []),
       ...modelUsageFailures,
+      ...artifactFailures,
     ].filter((value): value is string => Boolean(value));
     const retryBlocked = failures.length > 0 && Boolean(
       outcome.retryBlocked || semanticAttention ||
@@ -527,6 +663,8 @@ export class GraphRunner {
     });
     nodeState.evidenceFiles.push(relativeEvidencePath);
     if (failures.length === 0) {
+      store.state.artifactLineage ??= [];
+      store.state.artifactLineage.push(...producedArtifacts);
       const event = new RunLifecycle(this.graph, store.state).acceptNode(outcome.node.id);
       await store.appendEvent({
         at: new Date().toISOString(),

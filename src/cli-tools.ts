@@ -42,6 +42,29 @@ export const graphSchema = {
         baseCommit: { type: "string", pattern: "^[0-9a-f]{40}$" },
         allowExternalActions: { type: "boolean" },
         codeGraph: { type: "boolean" },
+        budgets: {
+          type: "object", additionalProperties: false,
+          required: ["maxNodes", "maxDepth", "maxDurationMs", "maxProviderCalls"],
+          properties: {
+            maxNodes: { type: "integer", minimum: 1 }, maxDepth: { type: "integer", minimum: 1 },
+            maxDurationMs: { type: "integer", minimum: 1 }, maxProviderCalls: { type: "integer", minimum: 1 },
+            maxCostUsd: { type: "number", minimum: 0 },
+          },
+        },
+        providerConcurrency: {
+          type: "object", additionalProperties: false,
+          properties: {
+            codex: { type: "integer", minimum: 1 }, claude: { type: "integer", minimum: 1 },
+            claudex: { type: "integer", minimum: 1 }, shell: { type: "integer", minimum: 1 },
+          },
+        },
+        automaticPolicy: {
+          type: "object", additionalProperties: false,
+          properties: {
+            allowReversiblePatches: { type: "boolean" },
+            allowedActionTypes: { type: "array", items: { type: "string", minLength: 1 } },
+          },
+        },
         advisor: {
           type: "object",
           additionalProperties: false,
@@ -97,6 +120,28 @@ export const graphSchema = {
               },
             },
           },
+          produces: {
+            type: "array", items: {
+              type: "object", additionalProperties: false, required: ["name", "type", "path"],
+              properties: { name: { type: "string", minLength: 1 }, type: { type: "string", minLength: 1 }, path: { type: "string", minLength: 1 } },
+            },
+          },
+          consumes: {
+            type: "array", items: {
+              type: "object", additionalProperties: false, required: ["name", "type", "from"],
+              properties: { name: { type: "string", minLength: 1 }, type: { type: "string", minLength: 1 }, from: { type: "string", minLength: 1 } },
+            },
+          },
+          resources: {
+            type: "array", items: {
+              type: "object", additionalProperties: false, required: ["name", "mode"],
+              properties: { name: { type: "string", minLength: 1 }, mode: { enum: ["shared", "exclusive"] }, units: { type: "integer", minimum: 1 } },
+            },
+          },
+          capabilities: { type: "array", items: { type: "string", minLength: 1 } },
+          estimatedCostUsd: { type: "number", minimum: 0 },
+          reversible: { type: "boolean" },
+          placement: { enum: ["local", "remote"] },
           context: {
             type: "object",
             additionalProperties: false,
@@ -259,7 +304,7 @@ export function graphToMermaid(graph: GraphDefinition): string {
 }
 
 export function completionScript(shell: "powershell" | "bash" | "zsh"): string {
-  const commands = "validate plan run progress follow wait inspect why advisor status runs events logs report approve retry cancel unlock doctor init schema node graph install-skills completion";
+  const commands = "validate plan run progress follow wait inspect why advisor status runs events logs report approve retry cancel unlock patch storage worker ui retention export verify-export doctor init schema node graph install-skills completion";
   if (shell === "powershell") return `Register-ArgumentCompleter -Native -CommandName agr -ScriptBlock { param($wordToComplete) '${commands}'.Split(' ') | Where-Object { $_ -like \"$wordToComplete*\" } | ForEach-Object { [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) } }\n`;
   if (shell === "zsh") return `#compdef agr\n_arguments '1:command:(${commands})'\n`;
   return `complete -W '${commands}' agr\n`;

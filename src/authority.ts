@@ -67,6 +67,40 @@ export function issueApprovalReceipt(
   };
 }
 
+export function tryIssuePolicyApprovalReceipt(
+  graph: GraphDefinition,
+  state: RunState,
+  gateNodeId: string,
+  fingerprint: string,
+  now = new Date().toISOString(),
+): ApprovalReceipt | undefined {
+  const gate = requireNode(graph, gateNodeId);
+  if (!policyApprovalEligible(graph, gateNodeId) || !gate.target) return undefined;
+  const action = graph.nodes.find((node) => node.type === "external_action" && node.needs.includes(gateNodeId) && node.target === gate.target)!;
+  evaluateMandate(graph, state, action.id, now);
+  return {
+    schemaVersion: 1,
+    approvalId: randomUUID(),
+    issuedBy: "policy",
+    gateNodeId,
+    actionNodeId: action.id,
+    target: gate.target,
+    actionParametersHash: actionParametersHash(action),
+    planRevisionId: state.activePlanRevisionId,
+    repositoryFingerprint: fingerprint,
+    dependencyEvidenceDigest: dependencyEvidenceDigest(graph, state, action),
+    policyHash: automaticPolicyHash(graph, state),
+    issuedAt: now,
+  };
+}
+
+export function policyApprovalEligible(graph: GraphDefinition, gateNodeId: string): boolean {
+  const gate = graph.nodes.find((node) => node.id === gateNodeId);
+  if (gate?.type !== "human_gate" || !gate.target) return false;
+  const action = graph.nodes.find((node) => node.type === "external_action" && node.needs.includes(gateNodeId) && node.target === gate.target);
+  return action?.reversible === true && graph.run.automaticPolicy?.allowedActionTypes?.includes(action.type) === true;
+}
+
 export function requireUsableReceipt(
   graph: GraphDefinition,
   state: RunState,
@@ -88,7 +122,10 @@ export function requireUsableReceipt(
     if (receipt.repositoryFingerprint !== fingerprint) {
       throw new Error("approval repository fingerprint changed; issue a new approval for the current repository state");
     }
-    if (receipt.policyHash !== explicitHumanPolicyHash) continue;
+    const validPolicy = receipt.issuedBy === "human"
+      ? receipt.policyHash === explicitHumanPolicyHash
+      : action.reversible === true && graph.run.automaticPolicy?.allowedActionTypes?.includes(action.type) === true && receipt.policyHash === automaticPolicyHash(graph, state);
+    if (!validPolicy) continue;
     return receipt;
   }
   throw new Error(`external action "${actionNodeId}" has no current unused approval receipt`);
@@ -192,6 +229,10 @@ function actionParametersHash(node: GraphNodeDefinition): string {
     prompt: node.prompt ?? null,
     checks: node.checks,
   }));
+}
+
+function automaticPolicyHash(graph: GraphDefinition, state: RunState): string {
+  return sha256(JSON.stringify({ mandateId: state.authority.mandate.mandateId, policy: graph.run.automaticPolicy ?? null }));
 }
 
 function dependencyEvidenceDigest(

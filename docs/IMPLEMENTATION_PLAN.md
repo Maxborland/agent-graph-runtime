@@ -1,11 +1,13 @@
 # Agent Graph Runtime — implementation plan
 
-Status: WP1-WP6 implemented on the current branch; WP7-WP12 proposed. This is
+Status: WP1-WP12 implemented and technically verified on the current branch;
+the final independent review found no remaining P0-P2 blockers. This is
 the implementation sequence for the target architecture in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) and the phased outcomes in
 [`ROADMAP.md`](ROADMAP.md). The v0.6 baseline remains governed by
 [`SPEC.md`](SPEC.md); implemented v0.7 additions are governed by
-[`V0.7-DELIVERY-SPEC.md`](V0.7-DELIVERY-SPEC.md).
+[`V0.7-DELIVERY-SPEC.md`](V0.7-DELIVERY-SPEC.md); WP7-WP12 are governed by
+[`V1.0-DELIVERY-SPEC.md`](V1.0-DELIVERY-SPEC.md).
 
 ## Implementation policy
 
@@ -15,8 +17,9 @@ the implementation sequence for the target architecture in
 - Introduce domain seams only when the next accepted slice consumes them.
 - Keep one owner for every mutable artifact and one authoritative coordinator
   transition path.
-- Do not combine persistence migration, Git integration, dynamic expansion, and
-  remote workers in one release slice.
+- Keep persistence migration, Git integration, dynamic expansion, and remote
+  workers in independently tested and revertible implementation slices even
+  when they share one delivery branch.
 - Commit implementation in independently revertible vertical slices.
 
 ## Required design records

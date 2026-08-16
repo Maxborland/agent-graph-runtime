@@ -19,6 +19,18 @@ exploration outside the review sandbox even when a node has no explicit
     "baseCommit": "optional exact 40-character commit for explicit run chaining",
     "codeGraph": true,
     "allowExternalActions": false,
+    "budgets": {
+      "maxNodes": 12,
+      "maxDepth": 5,
+      "maxDurationMs": 7200000,
+      "maxProviderCalls": 10,
+      "maxCostUsd": 5
+    },
+    "providerConcurrency": { "codex": 2, "claude": 1 },
+    "automaticPolicy": {
+      "allowReversiblePatches": true,
+      "allowedActionTypes": ["external_action"]
+    },
     "advisor": {
       "executor": "codex",
       "model": "gpt-5.6-sol",
@@ -38,6 +50,10 @@ exploration outside the review sandbox even when a node has no explicit
       "checks": ["pnpm test"],
       "maxAttempts": 2,
       "timeoutMs": 1200000,
+      "resources": [{ "name": "database", "mode": "exclusive" }],
+      "capabilities": ["docker"],
+      "estimatedCostUsd": 0.5,
+      "produces": [{ "name": "implementation", "type": "text/plain", "path": "result.txt" }],
       "context": {
         "symbols": ["PublicApi"],
         "impact": ["PublicApi.create"],
@@ -107,6 +123,31 @@ does not satisfy the requirement.
 Parallel nodes must not have overlapping ownership. Include lockfiles,
 migrations, generated files, and shared schemas explicitly.
 
+## Typed artifacts, resources, and budgets
+
+`produces` declares `{name,type,path}` and `consumes` declares
+`{name,type,from}` where `from` is a direct dependency. Producer and consumer
+types must match. Accepted bytes are copied to content-addressed storage and
+both source and stored bytes are rehashed before a consumer starts.
+
+`resources` contains named `shared` or `exclusive` claims. Use stable names for
+browser profiles, ports, databases, Docker daemons, GPUs, and other
+non-reentrant facilities. `capabilities` constrains worker placement.
+Set `placement` to `remote` only on `agent` or `review` nodes and invoke
+`agr run --workers CONFIG`; the default is `local`. Remote external actions are
+always rejected. The coordinator selects an enrolled worker whose executor,
+resource, and capability set satisfies the node.
+`providerConcurrency` limits active executor calls. `budgets` bounds expansion,
+depth, duration, provider calls, and optional estimated USD cost; accounting is
+checked before dispatch and persists across resume.
+
+Graph patches may change nodes but not run identity or its authority bounds.
+Automatic activation additionally requires `allowReversiblePatches`, an
+immutable patch marked reversible, no added or changed external action, no new
+trusted shell/check command, and no replacement of an existing executor.
+Adaptive runs always use an isolated Git worktree, even when the base revision
+declares no writable ownership.
+
 ## Orchestration boundary
 
 Each node must finish its own work before returning its handoff. Do not put
@@ -137,11 +178,16 @@ edits safely.
     "target": "deploy:production",
     "needs": ["approve-production"],
     "owns": [],
-    "checks": ["./trusted-deploy-script"],
-    "maxAttempts": 1
+      "checks": ["./trusted-deploy-script"],
+      "maxAttempts": 1,
+      "reversible": false
   }
 ]
 ```
 
 The graph must also set `run.allowExternalActions` to `true`. This only enables
-the capability; `agr approve` remains mandatory.
+the capability. `agr approve` remains mandatory unless the action itself is
+`reversible: true`, `run.automaticPolicy.allowedActionTypes` explicitly includes
+`external_action`, and the current mandate still allows the exact target and
+plan. Policy approval is a recorded single-use receipt; unknown or irreversible
+effects never qualify.

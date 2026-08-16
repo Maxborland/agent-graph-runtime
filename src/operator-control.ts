@@ -9,15 +9,17 @@ import { readRunStateArtifact } from "./observation.js";
 import { gitChangedFiles } from "./repository.js";
 import { acquireRunLock } from "./run-lock.js";
 import { RunStore } from "./store.js";
+import { resolveActivePlanGraph } from "./run-plan.js";
 import type { GraphDefinition, GraphNodeDefinition, RunState } from "./types.js";
 
 export class OperatorControl {
   constructor(
-    private readonly graph: GraphDefinition,
+    private graph: GraphDefinition,
     private readonly repositoryRoot: string,
   ) {}
 
   async approve(nodeId: string, target: string): Promise<RunState> {
+    this.graph = await resolveActivePlanGraph(this.repositoryRoot, this.graph);
     const gate = this.requireGate(nodeId, target);
     this.requireGateReady(gate.id, gate.needs, await this.currentState());
     return this.mutate(async (store) => {
@@ -37,6 +39,7 @@ export class OperatorControl {
   }
 
   async retry(nodeId: string, reconciliationPath?: string): Promise<RunState> {
+    this.graph = await resolveActivePlanGraph(this.repositoryRoot, this.graph);
     const definition = this.graph.nodes.find((node) => node.id === nodeId);
     if (!definition) {
       throw new CliError(`node "${nodeId}" does not exist`, 3, "NODE_NOT_FOUND");
@@ -113,6 +116,7 @@ export class OperatorControl {
   }
 
   async acknowledgeAdvisor(): Promise<RunState> {
+    this.graph = await resolveActivePlanGraph(this.repositoryRoot, this.graph);
     this.requireAdvisorBlocker(await this.currentState());
     return this.mutate(async (store) => {
       this.requireAdvisorBlocker(store.state);

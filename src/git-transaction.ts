@@ -19,7 +19,8 @@ export class GitRunTransaction {
   ) {}
 
   static required(graph: GraphDefinition): boolean {
-    return graph.nodes.some((node) => node.owns.length > 0 || (node.implicitOutputs?.length ?? 0) > 0);
+    return Boolean(graph.run.automaticPolicy?.allowReversiblePatches) ||
+      graph.nodes.some((node) => node.owns.length > 0 || (node.implicitOutputs?.length ?? 0) > 0);
   }
 
   static async prepare(

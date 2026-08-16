@@ -29,8 +29,8 @@ test("runner executes dependencies through adapters and accepts verified nodes",
     async execute(request: AdapterRequest) {
       calls.push(request.node.id);
       const relative = request.node.id === "contract" ? "docs/contract.md" : "src/api.ts";
-      await mkdir(join(root, relative.split("/")[0]!), { recursive: true });
-      await writeFile(join(root, relative), `${request.node.id}\n`);
+      await mkdir(join(request.repositoryRoot, relative.split("/")[0]!), { recursive: true });
+      await writeFile(join(request.repositoryRoot, relative), `${request.node.id}\n`);
       return {
         exitCode: 0,
         stdout: "",
@@ -358,8 +358,8 @@ test("runner executes independent ownership sets concurrently", async () => {
       maxActive = Math.max(maxActive, active);
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
       const relative = `${request.node.id}/result.txt`;
-      await mkdir(join(root, request.node.id), { recursive: true });
-      await writeFile(join(root, relative), "done\n");
+      await mkdir(join(request.repositoryRoot, request.node.id), { recursive: true });
+      await writeFile(join(request.repositoryRoot, relative), "done\n");
       active -= 1;
       return {
         exitCode: 0,
