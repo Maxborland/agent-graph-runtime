@@ -5,7 +5,28 @@ CLI, native Claude Code CLI, or proxy-routed Claudex launcher. The graph, not
 any model's conversation, owns
 dependencies, retries, path ownership, checks, evidence, and human approvals.
 
-Current status: working local v0.6.0, not published to npm.
+Current status: working local v1.0.0 implementation branch, not published to npm.
+
+## Documentation
+
+- [Behavioral specification](docs/SPEC.md) — implemented compatibility baseline.
+- [v0.7 delivery specification](docs/V0.7-DELIVERY-SPEC.md) — implemented
+  integrity, authority, and Git-transaction contract with acceptance mapping.
+- [v1.0 delivery specification](docs/V1.0-DELIVERY-SPEC.md) — implemented
+  adaptive graph, local UI, SQLite, worker, retention, and export contract.
+- [v1.0 operations guide](docs/V1.0-OPERATIONS.md) — migration, worker,
+  recovery, retention, and LAN procedures.
+- [Architecture](docs/ARCHITECTURE.md) — local-first,
+  provider-agnostic coordinator, Git transaction, worker trust, and authority
+  boundaries.
+- [Implementation roadmap](docs/ROADMAP.md) — evidence-gated v0.7-v1.0 outcome
+  sequence.
+- [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — ordered work packages,
+  data contracts, module impact, migrations, and verification requirements.
+
+WP1-WP12 are implemented on this branch and covered by the v0.6/v0.7
+compatibility suite plus v1.0 acceptance tests. This is not an npm release,
+hosted service, merge, or deployment claim.
 
 ## Requirements
 
@@ -48,7 +69,9 @@ and uses a 5-second heartbeat. `--json` keeps stdout machine-readable. Only one 
 may run a given run ID; `agr cancel` and Ctrl+C terminate active process trees,
 persist cancellation, release the lock, and exit with code 130. Cancelled nodes
 and external actions left running by a hard interruption are retry-blocked until
-their partial effects are inspected and explicitly reset with `agr retry <node>`.
+their partial effects are inspected. Retrying an uncertain external action
+additionally requires a fresh approval receipt and `agr retry <node>
+--reconciliation <evidence-file>`.
 
 When the run shell is backgrounded, `agr follow --format human` stays attached
 until completion, approval, attention, failure, or cancellation. Parent agents
@@ -64,7 +87,9 @@ agr why --json
 Every durable safe event carries a monotonic `seq` cursor. Synthetic observer
 heartbeats do not advance it.
 
-At a gate, `agr run` exits with code 2. The runtime cannot approve for you:
+At a gate, `agr run` exits with code 2 unless the graph explicitly pre-authorizes
+a reversible action through `run.automaticPolicy`. Sensitive, irreversible, and
+unknown effects always stop for an exact human receipt:
 
 ```powershell
 agr approve approve-production deploy:production
@@ -77,6 +102,22 @@ To deliberately rerun a node and invalidate all descendants:
 agr retry implementation
 agr run
 ```
+
+Writing runs execute in `.worktrees/<run-id>` from an exact commit and produce
+an immutable `result.json`. To chain work before integration, set
+`run.baseCommit` to an explicit prior `resultCommit`. Integration and rollback
+are always separate human commands:
+
+```powershell
+agr integrate <run-id> --target main --dry-run
+agr integrate <run-id> --target main
+agr rollback <run-id> --dry-run
+agr rollback <run-id>
+```
+
+These commands serialize through one repository-wide Git-operation lock,
+record an immutable pre-effect intent, and reconcile the expected tree after an
+interruption before another mutation is allowed.
 
 Operator and authoring commands:
 
@@ -98,6 +139,17 @@ agr install-skills --project C:\path\to\repo --dry-run
 agr unlock --force # only after verifying a foreign/PID-reused owner is stopped
 agr advisor status
 agr advisor acknowledge # only after reconciling a recorded advisor blocker
+agr patch propose proposed.graph.json --rationale "add bounded verification"
+agr patch list
+agr patch activate <patch-id>
+agr storage migrate
+agr worker enroll --executors codex,claude --resources gpu
+agr worker serve --worker-id <id> --workspace C:\worker\clone --coordinator-token-file C:\secure\coordinator.token --executors codex,claude
+agr run --workers .agent-graph\workers.json
+agr ui
+agr retention plan --older-than-ms 2592000000
+agr export <run-id> C:\path\to\bundle
+agr verify-export C:\path\to\bundle
 ```
 
 An optional `run.advisor` configures a second Codex, Claude, or Claudex model as
@@ -114,6 +166,10 @@ See [examples/read-only-smoke.graph.json](examples/read-only-smoke.graph.json)
 for a safe graph that exercises both native adapters,
 [examples/claudex-smoke.graph.json](examples/claudex-smoke.graph.json) for the
 proxy-routed launcher, and
+[examples/adaptive-local.graph.json](examples/adaptive-local.graph.json) for
+typed artifacts/resources, plus
+[examples/automatic-action-stops.graph.json](examples/automatic-action-stops.graph.json)
+for the negative irreversible-action safety case, and
 [skills/agent-graph-runtime/references/graph-format.md](skills/agent-graph-runtime/references/graph-format.md)
 for the complete graph format.
 
@@ -154,14 +210,43 @@ for the complete graph format.
 - configured checks run outside the model and gate acceptance.
 - state is atomically persisted under `.agent-graph/runs/<run-id>/`; raw CLI
   output, prompts, evidence, events, and the final report remain auditable.
+  `CURRENT.json` selects one hash-verified immutable state/event generation;
+  root `state.json` and `events.jsonl` are compatibility projections, not
+  authority.
 - changed graph content cannot resume under an existing `run.id`.
 - ownership compares content-aware dirty snapshots around every wave, so a
   second write to an already-dirty unowned path is still an escape.
 - `partial` or `blocked` agent handoffs stop as `needs_attention` with exit 5;
   they never consume another attempt until the operator inspects evidence and
   explicitly runs `agr retry`.
-- external actions are off by default and require both graph opt-in and an exact
-  accepted human gate.
+- attempts and evidence are append-only across manual retry generations. Every
+  evidence document is bound to a unique attempt ID, producer, hash, and size.
+- external actions are off by default and require graph opt-in, an exact
+  single-use receipt bound to repository and evidence state, and durable receipt
+  consumption before dispatch. An uncertain effect cannot retry without
+  reconciliation evidence and a new receipt.
+- plan patches are immutable and provenance-bound. Activation occurs only with
+  no active attempt; adaptive runs are isolated from the primary checkout.
+  Automatic activation is limited to reversible patches inside the human
+  mandate, cannot add/change an external action or trusted shell/check command,
+  and cannot replace an existing executor.
+- typed `produces`/`consumes` artifacts are content-addressed and rehashed at
+  the source and stored copy before a descendant dispatches.
+- named shared/exclusive resources, provider concurrency, wall time, provider
+  call count, and optional cost are enforced before dispatch and persisted.
+- the local UI is loopback-first and protects every read/command with an
+  unguessable session, strict Host/Origin checks, CSRF, one-use previews, and no
+  wildcard CORS. LAN binding requires operator-supplied TLS material.
+- SQLite WAL becomes authoritative only after a locked, hashed, backed-up
+  import and one marker. Workers receive scoped immutable attempts, never
+  approval/integration/external-action authority; leases use coordinator-time
+  expiry, fencing, and CAS. `placement: "remote"` plus `agr run --workers`
+  dispatches through enrolled endpoints. Successive clean Git snapshots are
+  transferred as bounded incremental bundles into per-attempt worker worktrees.
+- retention is preview-first and protects active or unresolved effects. Export
+  bundles include canonical coordinator attempts, leases, rejections and
+  acceptance intents plus a manifest that detects changed, missing, and added
+  bytes.
 
 Claudex owns its proxy, authentication, top-level model routing, effort,
 compaction, and context-window settings. A graph using
@@ -173,16 +258,19 @@ on `verify` and `human_gate` nodes because they do not dispatch an agent adapter
 ## Security and limitations
 
 Review graph files before running them: `checks` are trusted shell commands.
-The runtime never bypasses CLI permissions, auto-approves a gate, reverts an
+The runtime never bypasses CLI permissions, approves outside an explicit
+reversible automatic policy and human mandate, reverts an
 ownership violation, deploys, pushes, or sends messages unless an explicitly
 authorized external-action node defines that operation.
 
-Parallel nodes share one checkout in v0.6.0. Their ownership patterns must be
-disjoint, and wave changes plus handoff claims are checked. Because Git cannot
-attribute a same-checkout path to one concurrent process, use
-`maxConcurrency: 1` when strict per-process attribution matters. Automated
-worktree isolation/merge, a hosted UI, and automatic task invention are outside
-this version.
+Nodes in one run share that run's isolated checkout. Their ownership patterns
+must be disjoint, and wave changes plus handoff claims are checked. Because Git
+cannot attribute a same-worktree path to one concurrent process, use
+`maxConcurrency: 1` when strict per-process attribution matters. Remote workers
+are enrolled user-controlled environments; they are not a sandbox for untrusted
+code. The UI is self-hosted by `agr ui`, never hosted by this project. PostgreSQL,
+multiple active coordinators, public workers, and SaaS operation remain outside
+this version because no evidenced need was established.
 
 ## Development
 
@@ -191,5 +279,7 @@ pnpm test
 pnpm pack --dry-run
 ```
 
-The behavioral contract and acceptance mapping are in
-[docs/SPEC.md](docs/SPEC.md).
+The behavioral contracts and acceptance mappings are in
+[docs/SPEC.md](docs/SPEC.md) and
+[docs/V0.7-DELIVERY-SPEC.md](docs/V0.7-DELIVERY-SPEC.md), and
+[docs/V1.0-DELIVERY-SPEC.md](docs/V1.0-DELIVERY-SPEC.md).

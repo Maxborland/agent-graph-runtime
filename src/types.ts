@@ -12,9 +12,44 @@ export interface GraphRunDefinition {
   objective: string;
   repository: string;
   maxConcurrency: number;
+  baseCommit?: string;
   allowExternalActions?: boolean;
   codeGraph?: boolean;
   advisor?: AdvisorDefinition;
+  budgets?: RunBudgets;
+  providerConcurrency?: Partial<Record<ExecutorName, number>>;
+  automaticPolicy?: AutomaticPolicyDefinition;
+}
+
+export interface RunBudgets {
+  maxNodes: number;
+  maxDepth: number;
+  maxDurationMs: number;
+  maxProviderCalls: number;
+  maxCostUsd?: number;
+}
+
+export interface AutomaticPolicyDefinition {
+  allowReversiblePatches?: boolean;
+  allowedActionTypes?: string[];
+}
+
+export interface ResourceClaim {
+  name: string;
+  mode: "shared" | "exclusive";
+  units?: number;
+}
+
+export interface ProducedArtifactContract {
+  name: string;
+  type: string;
+  path: string;
+}
+
+export interface ConsumedArtifactContract {
+  name: string;
+  type: string;
+  from: string;
 }
 
 export interface AdvisorDefinition {
@@ -38,6 +73,13 @@ export interface GraphNodeDefinition {
   timeoutMs?: number;
   model?: string;
   requiredModelUsage?: RequiredModelUsage[];
+  produces?: ProducedArtifactContract[];
+  consumes?: ConsumedArtifactContract[];
+  resources?: ResourceClaim[];
+  capabilities?: string[];
+  estimatedCostUsd?: number;
+  reversible?: boolean;
+  placement?: "local" | "remote";
   context?: {
     symbols?: string[];
     impact?: string[];
@@ -73,22 +115,228 @@ export type NodeStatus =
 export interface NodeRunState {
   status: NodeStatus;
   attempts: number;
+  generation: number;
+  generationAttempts: number;
+  currentAttemptId?: string;
+  acceptedAttemptId?: string;
   retryBlocked?: boolean;
   approvedTarget?: string;
   lastError?: string;
   evidenceFiles: string[];
 }
 
+export type AttemptStatus =
+  | "running"
+  | "accepted"
+  | "failed"
+  | "superseded";
+
+export interface ArtifactRef {
+  schemaVersion: 1;
+  artifactId: string;
+  kind: string;
+  sha256: string;
+  size: number;
+  producerAttemptId: string;
+  localPath: string;
+}
+
+export interface ArtifactLineageRecord {
+  schemaVersion: 1;
+  artifactId: string;
+  name: string;
+  type: string;
+  sha256: string;
+  size: number;
+  sourcePath: string;
+  contentPath: string;
+  producerNodeId: string;
+  producerAttemptId: string;
+  planRevisionId: string;
+  lineage: string[];
+  recordedAt: string;
+}
+
+export interface AttemptRecord {
+  schemaVersion: 1;
+  attemptId: string;
+  nodeId: string;
+  planRevisionId: string;
+  generation: number;
+  ordinal: number;
+  status: AttemptStatus;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  evidence: ArtifactRef[];
+}
+
+export interface ApprovalReceipt {
+  schemaVersion: 1;
+  approvalId: string;
+  issuedBy: "human" | "policy";
+  gateNodeId: string;
+  actionNodeId: string;
+  target: string;
+  actionParametersHash: string;
+  planRevisionId: string;
+  repositoryFingerprint: string;
+  dependencyEvidenceDigest: string;
+  policyHash: string;
+  issuedAt: string;
+  expiresAt?: string;
+}
+
+export interface ApprovalReservation {
+  schemaVersion: 1;
+  reservationId: string;
+  approvalId: string;
+  attemptId: string;
+  actionParametersHash: string;
+  reservedAt: string;
+}
+
+export interface ApprovalConsumption {
+  schemaVersion: 1;
+  reservationId: string;
+  consumedAt: string;
+}
+
+export interface ReconciliationRecord {
+  schemaVersion: 1;
+  reconciliationId: string;
+  attemptId: string;
+  sha256: string;
+  size: number;
+  localPath: string;
+  recordedAt: string;
+}
+
+export interface RunMandate {
+  schemaVersion: 1;
+  mandateId: string;
+  issuedBy: "human";
+  planRevisionId: string;
+  allowedActions: NodeType[];
+  allowedTargets: string[];
+  maxNodes: number;
+  maxDepth: number;
+  maxDurationMs: number;
+  maxProviderCalls?: number;
+  maxCostUsd?: number;
+  policyHash: string;
+  issuedAt: string;
+}
+
+export interface PolicyDecision {
+  schemaVersion: 1;
+  decisionId: string;
+  mandateId: string;
+  actionNodeId: string;
+  outcome: "allow" | "deny";
+  reason: string;
+  policyHash: string;
+  decidedAt: string;
+}
+
+export interface AuthorityState {
+  schemaVersion: 1;
+  mandate: RunMandate;
+  policyDecisions: PolicyDecision[];
+  receipts: ApprovalReceipt[];
+  reservations: ApprovalReservation[];
+  consumptions: ApprovalConsumption[];
+  reconciliations: ReconciliationRecord[];
+}
+
+export interface RepositorySnapshot {
+  repositoryId: string;
+  root: string;
+  baseCommit: string;
+  worktreePath?: string;
+  runBranch?: string;
+}
+
+export interface CheckpointRecord {
+  schemaVersion: 1;
+  checkpointId: string;
+  commit: string;
+  planRevisionId: string;
+  acceptedAttemptIds: string[];
+  evidenceDigest: string;
+  createdAt: string;
+}
+
+export interface GitTransactionState {
+  schemaVersion: 1;
+  baseCommit: string;
+  runBranch: string;
+  worktreePath: string;
+  checkpoints: CheckpointRecord[];
+  resultId?: string;
+  resultCommit?: string;
+}
+
+export interface RunResult {
+  schemaVersion: 1;
+  resultId: string;
+  runId: string;
+  repositoryId: string;
+  baseCommit: string;
+  resultCommit: string;
+  planRevisionId: string;
+  checkpoints: CheckpointRecord[];
+  evidenceDigest: string;
+  completedAt: string;
+}
+
+export interface PlanRevisionRecord {
+  schemaVersion: 1;
+  revisionId: string;
+  runId: string;
+  graphHash: string;
+  createdAt: string;
+  parentRevisionId?: string;
+  patchId?: string;
+  graph?: GraphDefinition;
+}
+
+export interface GraphPatchRecord {
+  schemaVersion: 1;
+  patchId: string;
+  runId: string;
+  parentRevisionId: string;
+  proposer: string;
+  rationale: string;
+  proposedGraphHash: string;
+  proposedGraph: GraphDefinition;
+  reversible: boolean;
+  proposedAt: string;
+}
+
 export type RunStatus = "running" | "completed" | "failed" | "needs_attention" | "awaiting_approval" | "cancelled";
 
 export interface RunState {
+  schemaVersion: 2;
+  revision: number;
+  lastAppliedEventSeq: number;
   runId: string;
   graphHash: string;
+  activePlanRevisionId: string;
+  repository: RepositorySnapshot;
   status: RunStatus;
   createdAt: string;
   updatedAt: string;
   baselineChangedFiles: string[];
   nodes: Record<string, NodeRunState>;
+  attempts: Record<string, AttemptRecord>;
+  authority: AuthorityState;
+  artifactLineage?: ArtifactLineageRecord[];
+  executionAccounting?: {
+    providerCalls: number;
+    costUsd: number;
+  };
+  git?: GitTransactionState;
   advisor?: AdvisorRunState;
 }
 
@@ -110,6 +358,7 @@ export interface AdvisorRunState {
 }
 
 export interface RunEvent {
+  schemaVersion?: 2;
   seq: number;
   at: string;
   type: RunEventType;
@@ -136,6 +385,9 @@ export type RunEventType =
   | "run_needs_attention"
   | "run_cancelled"
   | "approval_recorded"
+  | "approval_reserved"
+  | "approval_consumed"
+  | "reconciliation_recorded"
   | "node_invalidated"
   | "advisor_note"
   | "advisor_failed"

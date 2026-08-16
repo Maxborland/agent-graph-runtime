@@ -19,6 +19,7 @@ import {
   runDirectory,
 } from "./cli-tools.js";
 import { validateGraph } from "./graph.js";
+import { currentBranch, integrateRun, rollbackRun } from "./git-integration.js";
 import { OperatorControl } from "./operator-control.js";
 import { buildExecutionPlan } from "./planner.js";
 import { GraphRunner, type RunProgressEvent } from "./runner.js";
@@ -26,6 +27,16 @@ import { acquireRunLock, inspectRunLock, recoverRunLock } from "./run-lock.js";
 import { installSkills } from "./skill-installer.js";
 import { sendNodeProgress } from "./node-progress.js";
 import { RunObserver } from "./observation.js";
+import { PlanRegistry } from "./adaptive-plan.js";
+import { activatePatchInStore, resolveActivePlanGraph } from "./run-plan.js";
+import { RunStore } from "./store.js";
+import { gitChangedFiles } from "./repository.js";
+import { startLocalControlServer, type LocalUiCommandRequest } from "./local-ui.js";
+import { CoordinatorDatabase, migrateRunToSqlite } from "./sqlite-coordinator.js";
+import { planRetention, executeRetention } from "./retention.js";
+import { exportRunBundle, verifyRunBundle } from "./export-bundle.js";
+import { startWorkerServer, type WorkerDispatchRequest } from "./worker-protocol.js";
+import { DistributedCoordinator, type EnrolledWorkerConnection } from "./distributed-coordinator.js";
 import type { GraphDefinition, RunState } from "./types.js";
 
 const defaultGraphPath = ".agent-graph/graph.json";
@@ -43,7 +54,7 @@ async function main(args: string[]): Promise<void> {
   }
   assertCommandOptions(command, args.slice(1));
   if (["--version", "-V"].includes(command)) {
-    console.log("0.6.0");
+    console.log("1.0.0");
     return;
   }
 
@@ -167,7 +178,34 @@ async function main(args: string[]): Promise<void> {
     const cancellationPoll = setInterval(() => {
       void readFile(cancellationPath).then(() => controller.abort(), () => undefined);
     }, 200);
+    let coordinatorDatabase: CoordinatorDatabase | undefined;
     try {
+      let remoteCoordinator: DistributedCoordinator | undefined;
+      const workersPath = optionValue(args, "--workers");
+      if (graph.nodes.some((node) => node.placement === "remote") || workersPath) {
+        if (!workersPath) throw new CliError("remote graph nodes require --workers CONFIG", 3, "WORKERS_REQUIRED");
+        const absoluteConfig = resolve(workersPath);
+        const config = JSON.parse(await readFile(absoluteConfig, "utf8")) as {
+          databasePath?: unknown;
+          workers?: unknown;
+        };
+        if (typeof config.databasePath !== "string" || !Array.isArray(config.workers)) throw new CliError("workers config requires databasePath and workers", 3, "INVALID_WORKERS_CONFIG");
+        const connections = new Map<string, EnrolledWorkerConnection>();
+        for (const candidate of config.workers) {
+          if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new CliError("invalid worker connection", 3, "INVALID_WORKERS_CONFIG");
+          const worker = candidate as Record<string, unknown>;
+          if (["workerId", "endpoint", "coordinatorToken", "workerToken"].some((key) => typeof worker[key] !== "string" || !worker[key])) {
+            throw new CliError("worker connection requires workerId, endpoint, coordinatorToken, and workerToken", 3, "INVALID_WORKERS_CONFIG");
+          }
+          const connection = worker as unknown as EnrolledWorkerConnection;
+          connections.set(connection.workerId, connection);
+        }
+        const databasePath = resolve(dirname(absoluteConfig), config.databasePath);
+        await RunStore.open(repositoryRoot, graph, await gitChangedFiles(repositoryRoot));
+        await migrateRunToSqlite(repositoryRoot, graph.run.id, databasePath);
+        coordinatorDatabase = new CoordinatorDatabase(databasePath);
+        remoteCoordinator = new DistributedCoordinator(coordinatorDatabase, connections);
+      }
       const runner = new GraphRunner(graph, repositoryRoot, {
         codex: new CodexAdapter(),
         claude: new ClaudeAdapter(),
@@ -177,6 +215,7 @@ async function main(args: string[]): Promise<void> {
         verbose: args.includes("--verbose"),
         onProgress: printProgress,
         signal: controller.signal,
+        ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
       });
       const state = await runner.run();
       if (json) console.log(JSON.stringify(state, null, 2));
@@ -186,6 +225,7 @@ async function main(args: string[]): Promise<void> {
       clearInterval(cancellationPoll);
       process.removeListener("SIGINT", onInterrupt);
       await rm(cancellationPath, { force: true });
+      coordinatorDatabase?.close();
       await lock.release();
     }
     return;
@@ -380,6 +420,27 @@ async function main(args: string[]): Promise<void> {
     return;
   }
 
+  if (command === "integrate") {
+    const values = positional(args.slice(1));
+    const runId = required(values[0], "integrate requires RUN_ID");
+    const { repositoryRoot } = await loadGraph(values[1]);
+    const target = optionValue(args, "--target") ?? await currentBranch(repositoryRoot);
+    const result = await integrateRun(repositoryRoot, runId, target, args.includes("--dry-run"));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`${result.mutated ? "Integrated" : "Preview"} ${runId} -> ${target} (${result.mode}) at ${result.targetAfter}`);
+    return;
+  }
+
+  if (command === "rollback") {
+    const values = positional(args.slice(1));
+    const runId = required(values[0], "rollback requires RUN_ID");
+    const { repositoryRoot } = await loadGraph(values[1]);
+    const result = await rollbackRun(repositoryRoot, runId, args.includes("--dry-run"));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`${result.mutated ? "Rolled back" : "Preview rollback"} ${runId} on ${result.targetBranch} at ${result.targetAfter}`);
+    return;
+  }
+
   if (command === "approve") {
     const values = positional(args.slice(1));
     const nodeId = required(values[0], "approve requires NODE_ID");
@@ -395,9 +456,189 @@ async function main(args: string[]): Promise<void> {
     const values = positional(args.slice(1));
     const nodeId = required(values[0], "retry requires NODE_ID");
     const { graph, repositoryRoot } = await loadGraph(values[1]);
-    const state = await new OperatorControl(graph, repositoryRoot).retry(nodeId);
+    const state = await new OperatorControl(graph, repositoryRoot).retry(
+      nodeId,
+      optionValue(args, "--reconciliation"),
+    );
     if (json) console.log(JSON.stringify(state, null, 2));
     else printState(state);
+    return;
+  }
+
+  if (command === "patch") {
+    const action = args[1];
+    if (!["propose", "list", "activate"].includes(action ?? "")) throw new CliError("patch requires propose, list, or activate", 3, "INVALID_ARGUMENT");
+    if (action === "propose") {
+      const values = positional(args.slice(2));
+      const proposedPath = required(values[0], "patch propose requires PROPOSED_GRAPH");
+      const { graph, repositoryRoot } = await loadGraph(values[1]);
+      const proposed = JSON.parse(await readFile(resolve(proposedPath), "utf8")) as GraphDefinition;
+      const validation = validateGraph(proposed);
+      if (validation.errors.length > 0) throw new CliError(validation.errors.join("\n"), 3, "INVALID_GRAPH");
+      const root = runDirectory(repositoryRoot, graph.run.id);
+      const registry = await PlanRegistry.open(root, graph, graph.run.budgets);
+      const record = await registry.propose(proposed, {
+        proposer: optionValue(args, "--proposer") ?? "human:cli",
+        rationale: required(optionValue(args, "--rationale"), "patch propose requires --rationale TEXT"),
+        reversible: !args.includes("--irreversible"),
+      });
+      if (json) console.log(JSON.stringify(record, null, 2));
+      else console.log(`Proposed patch ${record.patchId} on ${record.parentRevisionId}`);
+      return;
+    }
+    const { graph, repositoryRoot } = await loadGraph(positional(args.slice(2))[action === "activate" ? 1 : 0]);
+    const registry = await PlanRegistry.open(runDirectory(repositoryRoot, graph.run.id), graph, graph.run.budgets);
+    if (action === "list") {
+      const records = await registry.patches();
+      if (json) console.log(JSON.stringify(records, null, 2));
+      else for (const record of records) console.log(`${record.patchId}\t${record.parentRevisionId}\t${record.proposer}\t${record.rationale}`);
+      return;
+    }
+    const patchId = required(positional(args.slice(2))[0], "patch activate requires PATCH_ID");
+    const lock = await acquireRunLock(repositoryRoot, graph.run.id);
+    try {
+      const currentGraph = await resolveActivePlanGraph(repositoryRoot, graph);
+      const store = await RunStore.open(repositoryRoot, currentGraph, await gitChangedFiles(repositoryRoot));
+      const activated = await activatePatchInStore(graph, store, patchId, false);
+      if (json) console.log(JSON.stringify({ patchId, revisionId: store.state.activePlanRevisionId, graph: activated }, null, 2));
+      else console.log(`Activated ${patchId} as ${store.state.activePlanRevisionId}; the next wave uses the new revision.`);
+    } finally { await lock.release(); }
+    return;
+  }
+
+  if (command === "storage") {
+    const action = args[1];
+    if (!["migrate", "status"].includes(action ?? "")) throw new CliError("storage requires migrate or status", 3, "INVALID_ARGUMENT");
+    const values = positional(args.slice(2));
+    const { graph, repositoryRoot } = await loadGraph(values[1] ?? values[0]);
+    const runId = values.length > 1 ? values[0]! : graph.run.id;
+    const databasePath = resolve(optionValue(args, "--database") ?? join(repositoryRoot, ".agent-graph", "coordinator.sqlite"));
+    if (action === "migrate") {
+      const lock = await acquireRunLock(repositoryRoot, runId);
+      try {
+        const result = await migrateRunToSqlite(repositoryRoot, runId, databasePath);
+        if (json) console.log(JSON.stringify(result, null, 2));
+        else console.log(`SQLite is authoritative for ${runId}: ${result.databasePath} (${result.sourceManifestHash})`);
+      } finally { await lock.release(); }
+    } else {
+      const markerPath = join(repositoryRoot, ".agent-graph", "AUTHORITATIVE_STORE.json");
+      const marker = JSON.parse(await readFile(markerPath, "utf8")) as unknown;
+      if (json) console.log(JSON.stringify(marker, null, 2));
+      else console.log(await readFile(markerPath, "utf8"));
+    }
+    return;
+  }
+
+  if (command === "worker") {
+    const action = args[1];
+    if (!["enroll", "list", "serve"].includes(action ?? "")) throw new CliError("worker requires enroll, list, or serve", 3, "INVALID_ARGUMENT");
+    if (action === "serve") {
+      const workspace = resolve(optionValue(args, "--workspace") ?? process.cwd());
+      const tokenFile = required(optionValue(args, "--coordinator-token-file"), "worker serve requires --coordinator-token-file PATH");
+      const workerId = required(optionValue(args, "--worker-id"), "worker serve requires --worker-id ID");
+      const executors = required(optionValue(args, "--executors"), "worker serve requires --executors LIST").split(",").filter(Boolean);
+      const host = optionValue(args, "--host") ?? "127.0.0.1";
+      const certPath = optionValue(args, "--cert");
+      const keyPath = optionValue(args, "--key");
+      if (!["127.0.0.1", "localhost", "::1"].includes(host) && (!certPath || !keyPath)) throw new CliError("non-loopback worker serve requires --cert and --key", 3, "TLS_REQUIRED");
+      const server = await startWorkerServer({
+        host,
+        ...(optionValue(args, "--port") === undefined ? {} : { port: numberOption(args, "--port", 0) }),
+        coordinatorToken: (await readFile(resolve(tokenFile), "utf8")).trim(),
+        workerId,
+        capabilities: { executors, resources: (optionValue(args, "--resources") ?? "").split(",").filter(Boolean), capabilities: (optionValue(args, "--capabilities") ?? "").split(",").filter(Boolean), maxConcurrency: numberOption(args, "--max-concurrency", 1) },
+        workspace,
+        ...(certPath && keyPath ? { tls: { cert: await readFile(resolve(certPath)), key: await readFile(resolve(keyPath)) } } : {}),
+        execute: (request: WorkerDispatchRequest, attemptWorkspace: string) => executeWorkerRequest(request, attemptWorkspace),
+      });
+      if (json) console.log(JSON.stringify({ origin: server.origin, workerId }, null, 2));
+      else console.log(`Worker ${workerId} listening at ${server.origin}; press Ctrl+C to stop.`);
+      await new Promise<void>((done) => process.once("SIGINT", done));
+      await server.close();
+      return;
+    }
+    const { repositoryRoot } = await loadGraph(positional(args.slice(2))[0]);
+    const databasePath = resolve(optionValue(args, "--database") ?? join(repositoryRoot, ".agent-graph", "coordinator.sqlite"));
+    const database = new CoordinatorDatabase(databasePath);
+    try {
+      if (action === "enroll") {
+        const executors = required(optionValue(args, "--executors"), "worker enroll requires --executors LIST").split(",").filter(Boolean);
+        const resources = (optionValue(args, "--resources") ?? "").split(",").filter(Boolean);
+        const enrollment = database.enrollWorker({ executors, resources, capabilities: (optionValue(args, "--capabilities") ?? "").split(",").filter(Boolean), maxConcurrency: numberOption(args, "--max-concurrency", 1) }, numberOption(args, "--ttl-ms", 24 * 60 * 60_000));
+        if (json) console.log(JSON.stringify(enrollment, null, 2));
+        else console.log(`Worker ${enrollment.workerId} enrolled until ${new Date(enrollment.expiresAt).toISOString()}. Save this one-time token securely: ${enrollment.token}`);
+      } else {
+        const workers = database.workers();
+        if (json) console.log(JSON.stringify(workers, null, 2));
+        else for (const worker of workers) console.log(`${worker.workerId}\t${worker.capabilities.executors.join(",")}\t${new Date(worker.expiresAt).toISOString()}`);
+      }
+    } finally { database.close(); }
+    return;
+  }
+
+  if (command === "retention") {
+    const action = args[1];
+    if (!["plan", "prune"].includes(action ?? "")) throw new CliError("retention requires plan or prune", 3, "INVALID_ARGUMENT");
+    const { repositoryRoot } = await loadGraph(positional(args.slice(2))[0]);
+    if (action === "prune") {
+      const planPath = optionValue(args, "--plan");
+      if (!planPath) throw new CliError("retention prune requires --plan FILE containing the reviewed JSON plan", 3, "PLAN_REQUIRED");
+      const plan = JSON.parse(await readFile(resolve(planPath), "utf8")) as Awaited<ReturnType<typeof planRetention>>;
+      if (!args.includes("--execute")) throw new CliError("retention prune is dry-run by default; add --execute after reviewing the supplied plan", 3, "CONFIRMATION_REQUIRED");
+      const result = await executeRetention(repositoryRoot, plan);
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`Removed ${result.removed.length} planned path${result.removed.length === 1 ? "" : "s"}.`);
+    } else {
+      const plan = await planRetention(repositoryRoot, { olderThanMs: numberOption(args, "--older-than-ms", 30 * 24 * 60 * 60_000) });
+      if (json) console.log(JSON.stringify(plan, null, 2));
+      else {
+        console.log(`Retention preview ${plan.planHash}: ${plan.removable.length} removable, ${plan.protected.length} protected.`);
+        for (const entry of plan.removable) console.log(`  remove ${entry.path} — ${entry.reason}`);
+      }
+    }
+    return;
+  }
+
+  if (command === "export") {
+    const values = positional(args.slice(1));
+    const runId = required(values[0], "export requires RUN_ID");
+    const destination = required(values[1], "export requires DESTINATION");
+    const { repositoryRoot } = await loadGraph(values[2]);
+    const result = await exportRunBundle(repositoryRoot, runId, resolve(destination));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`Exported ${runId} to ${result.destination}; manifest ${result.manifestHash}`);
+    return;
+  }
+
+  if (command === "verify-export") {
+    const destination = required(positional(args.slice(1))[0], "verify-export requires DESTINATION");
+    const result = await verifyRunBundle(resolve(destination));
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log(result.valid ? "Export bundle integrity verified." : `Export bundle invalid: changed=${result.changed.join(",")} missing=${result.missing.join(",")} added=${result.added.join(",")}`);
+    if (!result.valid) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "ui") {
+    const { graph, repositoryRoot } = await loadGraph(positional(args.slice(1))[0]);
+    const lan = args.includes("--lan");
+    const certPath = optionValue(args, "--cert");
+    const keyPath = optionValue(args, "--key");
+    const publicHost = optionValue(args, "--public-host");
+    if (lan && (!certPath || !keyPath)) throw new CliError("--lan requires --cert and --key for TLS", 3, "TLS_REQUIRED");
+    const ui = await startLocalControlServer({
+      host: lan ? (optionValue(args, "--host") ?? "0.0.0.0") : "127.0.0.1",
+      ...(lan && publicHost ? { publicHost } : {}),
+      ...(optionValue(args, "--port") === undefined ? {} : { port: numberOption(args, "--port", 0) }),
+      ...(certPath && keyPath ? { tls: { cert: await readFile(resolve(certPath)), key: await readFile(resolve(keyPath)) } } : {}),
+      readModel: () => new RunObserver(repositoryRoot, graph.run.id).inspect(),
+      preview: (request: LocalUiCommandRequest) => previewUiCommand(request, graph, repositoryRoot),
+      command: (request: LocalUiCommandRequest) => executeUiCommand(request, graph, repositoryRoot),
+    });
+    if (json) console.log(JSON.stringify({ origin: ui.origin, launchUrl: ui.launchUrl }, null, 2));
+    else console.log(`Local control UI: ${ui.launchUrl}\nPress Ctrl+C to stop.`);
+    await new Promise<void>((done) => process.once("SIGINT", done));
+    await ui.close();
     return;
   }
 
@@ -558,6 +799,97 @@ function printProgress(event: RunProgressEvent): void {
   process.stderr.write(`[${timestamp}] ${message}\n`);
 }
 
+async function executeUiCommand(request: LocalUiCommandRequest, graph: GraphDefinition, repositoryRoot: string): Promise<unknown> {
+  const argument = (name: string): string => {
+    const value = request.arguments[name];
+    if (typeof value !== "string" || !value) throw new CliError(`${request.command} requires ${name}`, 3, "INVALID_ARGUMENT");
+    return value;
+  };
+  if (request.command === "retry") return new OperatorControl(graph, repositoryRoot).retry(argument("nodeId"), typeof request.arguments.reconciliationPath === "string" ? request.arguments.reconciliationPath : undefined);
+  if (request.command === "approve") return new OperatorControl(graph, repositoryRoot).approve(argument("nodeId"), argument("target"));
+  if (request.command === "integrate") return integrateRun(repositoryRoot, typeof request.arguments.runId === "string" ? request.arguments.runId : graph.run.id, typeof request.arguments.target === "string" ? request.arguments.target : await currentBranch(repositoryRoot), false);
+  if (request.command === "rollback") return rollbackRun(repositoryRoot, typeof request.arguments.runId === "string" ? request.arguments.runId : graph.run.id, false);
+  if (request.command === "activate_patch") {
+    const lock = await acquireRunLock(repositoryRoot, graph.run.id);
+    try {
+      const currentGraph = await resolveActivePlanGraph(repositoryRoot, graph);
+      const store = await RunStore.open(repositoryRoot, currentGraph, await gitChangedFiles(repositoryRoot));
+      const activated = await activatePatchInStore(graph, store, argument("patchId"), false);
+      return { revisionId: store.state.activePlanRevisionId, graph: activated };
+    } finally { await lock.release(); }
+  }
+  if (request.command === "cancel") {
+    const inspection = await inspectRunLock(repositoryRoot, graph.run.id);
+    if (!inspection.record || !["live", "foreign"].includes(inspection.status)) throw new CliError(`run ${graph.run.id} has no live owner to cancel`, 3, "RUN_NOT_ACTIVE");
+    const path = join(repositoryRoot, ".agent-graph", "runs", graph.run.id, `cancel.${inspection.record.token}.requested`);
+    await writeFile(path, `${new Date().toISOString()}\n`, { encoding: "utf8", flag: "wx" }).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+    return { cancellationRequested: true };
+  }
+  throw new CliError(`unsupported UI command ${request.command}`, 3, "INVALID_ARGUMENT");
+}
+
+async function previewUiCommand(request: LocalUiCommandRequest, graph: GraphDefinition, repositoryRoot: string): Promise<unknown> {
+  const value = (name: string): string => {
+    const result = request.arguments[name];
+    if (typeof result !== "string" || !result) throw new CliError(`${request.command} requires ${name}`, 3, "INVALID_ARGUMENT");
+    return result;
+  };
+  if (request.command === "integrate") return integrateRun(repositoryRoot, typeof request.arguments.runId === "string" ? request.arguments.runId : graph.run.id, typeof request.arguments.target === "string" ? request.arguments.target : await currentBranch(repositoryRoot), true);
+  if (request.command === "rollback") return rollbackRun(repositoryRoot, typeof request.arguments.runId === "string" ? request.arguments.runId : graph.run.id, true);
+  if (request.command === "retry") {
+    const state = await readRunState(repositoryRoot, graph.run.id);
+    const nodeId = value("nodeId");
+    if (!state.nodes[nodeId]) throw new CliError(`node ${nodeId} does not exist`, 3, "NODE_NOT_FOUND");
+    return { nodeId, currentStatus: state.nodes[nodeId].status, invalidatesDescendants: true };
+  }
+  if (request.command === "approve") {
+    const nodeId = value("nodeId");
+    const target = value("target");
+    const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+    if (node?.type !== "human_gate" || node.target !== target) throw new CliError("approval does not match an exact human gate target", 3, "INVALID_APPROVAL");
+    return { nodeId, target, singleUse: true };
+  }
+  if (request.command === "cancel") return inspectRunLock(repositoryRoot, graph.run.id);
+  if (request.command === "activate_patch") {
+    const registry = await PlanRegistry.open(runDirectory(repositoryRoot, graph.run.id), graph, graph.run.budgets);
+    const patchId = value("patchId");
+    const patch = (await registry.patches()).find((candidate) => candidate.patchId === patchId);
+    if (!patch) throw new CliError(`patch ${patchId} does not exist`, 3, "PATCH_NOT_FOUND");
+    return { patchId, parentRevisionId: patch.parentRevisionId, proposedGraphHash: patch.proposedGraphHash, reversible: patch.reversible };
+  }
+  throw new CliError(`unsupported UI command ${request.command}`, 3, "INVALID_ARGUMENT");
+}
+
+async function executeWorkerRequest(request: WorkerDispatchRequest, workspace: string) {
+  const executor = request.payload.executor;
+  const adapters = { codex: new CodexAdapter(), claude: new ClaudeAdapter(), claudex: new ClaudexAdapter() } as const;
+  if (!(executor in adapters)) throw new Error(`worker executor ${executor} is unavailable`);
+  const adapter = adapters[executor as keyof typeof adapters];
+  const node = {
+    id: request.envelope.nodeId,
+    type: "agent" as const,
+    executor: executor as "codex" | "claude" | "claudex",
+    prompt: request.payload.prompt,
+    needs: [], owns: ["**"], checks: [], maxAttempts: 1,
+  };
+  const result = await adapter.execute({
+    node,
+    repositoryRoot: workspace,
+    prompt: request.payload.prompt,
+    artifactsDirectory: join(workspace, ".agent-graph-worker", request.envelope.attemptId),
+    timeoutMs: Math.max(1, request.lease.expiresAt - Date.now()),
+  });
+  return {
+    status: result.handoff.status,
+    summary: result.handoff.summary,
+    changedFiles: result.handoff.changedFiles,
+    artifacts: [],
+    ...(result.modelUsage === undefined ? {} : { modelUsage: result.modelUsage }),
+  };
+}
+
 function printHelp(): void {
   console.log(`Agent Graph Runtime
 
@@ -566,7 +898,7 @@ Usage:
   agr validate [GRAPH]
   agr plan [GRAPH] [--json]
   agr doctor [GRAPH]
-  agr run [GRAPH] [--json] [--verbose]
+  agr run [GRAPH] [--json] [--verbose] [--workers CONFIG]
   agr progress --phase PHASE --message MESSAGE [--percent N]
   agr cancel [GRAPH]
   agr unlock [GRAPH] [--force]
@@ -579,7 +911,21 @@ Usage:
   agr runs|events|report [GRAPH] [--json]
   agr logs [NODE_ID] [GRAPH] [--json]
   agr approve NODE_ID TARGET [GRAPH]
-  agr retry NODE_ID [GRAPH]
+  agr retry NODE_ID [GRAPH] [--reconciliation FILE]
+  agr integrate RUN_ID [GRAPH] [--target BRANCH] [--dry-run]
+  agr rollback RUN_ID [GRAPH] [--dry-run]
+  agr patch propose PROPOSED_GRAPH [GRAPH] --rationale TEXT [--proposer ID]
+  agr patch list [GRAPH]
+  agr patch activate PATCH_ID [GRAPH]
+  agr storage migrate [RUN_ID] [GRAPH] [--database PATH]
+  agr storage status [GRAPH]
+  agr worker enroll|list [GRAPH] [--database PATH]
+  agr worker serve --worker-id ID --workspace DIR --coordinator-token-file FILE --executors LIST
+  agr ui [GRAPH] [--lan --host ADDRESS --public-host HOST --cert FILE --key FILE]
+  agr retention plan [GRAPH] [--older-than-ms N] [--json]
+  agr retention prune [GRAPH] --plan FILE --execute
+  agr export RUN_ID DESTINATION [GRAPH]
+  agr verify-export DESTINATION
   agr schema
   agr node explain NODE_ID [GRAPH]
   agr graph [GRAPH] [--format mermaid]
@@ -616,7 +962,7 @@ function nonNegativeIntegerOption(args: string[], name: string, fallback: number
 }
 
 function positional(args: string[]): string[] {
-  const valueFlags = new Set(["--heartbeat-ms", "--interval-ms", "--timeout-ms", "--after", "--template", "--format", "--project", "--phase", "--message", "--percent"]);
+  const valueFlags = new Set(["--heartbeat-ms", "--interval-ms", "--timeout-ms", "--after", "--template", "--format", "--project", "--phase", "--message", "--percent", "--reconciliation", "--target", "--rationale", "--proposer", "--database", "--executors", "--resources", "--capabilities", "--max-concurrency", "--ttl-ms", "--older-than-ms", "--plan", "--cert", "--key", "--host", "--public-host", "--port", "--workspace", "--coordinator-token-file", "--worker-id", "--workers"]);
   const values: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
@@ -637,12 +983,17 @@ function assertCommandOptions(command: string, args: string[]): void {
   const common = ["--help", "-h"];
   const allowedByCommand: Record<string, string[]> = {
     validate: ["--json"], plan: ["--json"], init: ["--json", "--template"],
-    run: ["--json", "--heartbeat-ms", "--verbose"], progress: ["--json", "--phase", "--message", "--percent"], cancel: ["--json"], unlock: ["--json", "--force"],
+    run: ["--json", "--heartbeat-ms", "--verbose", "--workers"], progress: ["--json", "--phase", "--message", "--percent"], cancel: ["--json"], unlock: ["--json", "--force"],
     status: ["--json", "--watch", "--interval-ms"], runs: ["--json"], events: ["--json"],
     follow: ["--after", "--format", "--interval-ms"], wait: ["--json", "--after", "--timeout-ms"], inspect: ["--json"], why: ["--json"], advisor: ["--json"],
-    logs: ["--json"], report: ["--json"], approve: ["--json"], retry: ["--json"],
+    logs: ["--json"], report: ["--json"], approve: ["--json"], retry: ["--json", "--reconciliation"],
+    integrate: ["--json", "--target", "--dry-run"], rollback: ["--json", "--dry-run"],
     doctor: ["--json"], schema: ["--json"], node: ["--json"], graph: ["--json", "--format"],
     completion: [], "install-skills": ["--json", "--project", "--user", "--dry-run"],
+    patch: ["--json", "--rationale", "--proposer", "--irreversible"],
+    storage: ["--json", "--database"], worker: ["--json", "--database", "--executors", "--resources", "--capabilities", "--max-concurrency", "--ttl-ms", "--workspace", "--coordinator-token-file", "--worker-id", "--host", "--port", "--cert", "--key"],
+    retention: ["--json", "--older-than-ms", "--plan", "--execute"], export: ["--json"], "verify-export": ["--json"],
+    ui: ["--json", "--lan", "--cert", "--key", "--host", "--public-host", "--port"],
   };
   const known = new Set([...(allowedByCommand[command] ?? []), ...common]);
   for (const argument of args) {

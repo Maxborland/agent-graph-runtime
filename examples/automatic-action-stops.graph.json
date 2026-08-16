@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "run": {
+    "id": "automatic-action-stops-example",
+    "objective": "Demonstrate that an irreversible action still stops",
+    "repository": ".",
+    "maxConcurrency": 1,
+    "allowExternalActions": true,
+    "automaticPolicy": {
+      "allowedActionTypes": ["external_action"]
+    }
+  },
+  "nodes": [
+    {
+      "id": "approve",
+      "type": "human_gate",
+      "target": "remote:example",
+      "needs": [],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1
+    },
+    {
+      "id": "action",
+      "type": "external_action",
+      "executor": "shell",
+      "target": "remote:example",
+      "reversible": false,
+      "needs": ["approve"],
+      "owns": [],
+      "checks": ["node -e \"process.exit(0)\""],
+      "maxAttempts": 1
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { mkdir, open, readFile, rm } from "node:fs/promises";
 
 import { CliError } from "./cli-error.js";
+import { assertSafeRunId } from "./run-id.js";
 
 export interface LockRecord {
   token: string;
@@ -24,6 +25,7 @@ export interface RunLockInspection {
 }
 
 export async function acquireRunLock(repositoryRoot: string, runId: string): Promise<RunLock> {
+  assertSafeRunId(runId);
   const runDirectory = join(repositoryRoot, ".agent-graph", "runs", runId);
   const path = join(runDirectory, ".run.lock");
   const recoveryPath = `${path}.recovery`;
@@ -76,6 +78,7 @@ export async function inspectRunLock(
   repositoryRoot: string,
   runId: string,
 ): Promise<RunLockInspection> {
+  assertSafeRunId(runId);
   const path = join(repositoryRoot, ".agent-graph", "runs", runId, ".run.lock");
   if (!(await exists(path))) return { status: "missing" };
   const record = await readLock(path);
@@ -89,6 +92,7 @@ export async function recoverRunLock(
   runId: string,
   force: boolean,
 ): Promise<LockRecord | undefined> {
+  assertSafeRunId(runId);
   const path = join(repositoryRoot, ".agent-graph", "runs", runId, ".run.lock");
   const recoveryPath = `${path}.recovery`;
   const recovery = await acquireRecoveryGuard(recoveryPath, runId, force);

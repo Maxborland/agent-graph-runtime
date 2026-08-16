@@ -3,6 +3,9 @@ import { join } from "node:path";
 
 import { CliError } from "./cli-error.js";
 import { inspectRunLock } from "./run-lock.js";
+import { readCurrentGeneration } from "./persistence.js";
+import { readSqliteRunProjection } from "./sqlite-coordinator.js";
+import { assertSafeRunId } from "./run-id.js";
 import type { RunEvent, RunState } from "./types.js";
 
 export interface RunObservationSnapshot {
@@ -73,6 +76,9 @@ const runEventTypes = new Set<RunEvent["type"]>([
   "run_needs_attention",
   "run_cancelled",
   "approval_recorded",
+  "approval_reserved",
+  "approval_consumed",
+  "reconciliation_recorded",
   "node_invalidated",
   "advisor_note",
   "advisor_failed",
@@ -272,7 +278,13 @@ export class RunObserver {
 
 export async function readRunStateArtifact(repositoryRoot: string, runId: string): Promise<RunState> {
   try {
-    return JSON.parse(await readFile(join(runRoot(repositoryRoot, runId), "state.json"), "utf8")) as RunState;
+    const sqlite = await readSqliteRunProjection(repositoryRoot, runId);
+    if (sqlite) return JSON.parse(sqlite.stateRaw) as RunState;
+    const root = runRoot(repositoryRoot, runId);
+    const current = await readCurrentGeneration(root);
+    return JSON.parse(
+      current?.stateRaw ?? await readFile(join(root, "state.json"), "utf8"),
+    ) as RunState;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new CliError(`run ${runId} has no state yet; start it with agr run`, 3, "RUN_NOT_FOUND");
@@ -283,7 +295,13 @@ export async function readRunStateArtifact(repositoryRoot: string, runId: string
 
 export async function readRunEventArtifact(repositoryRoot: string, runId: string): Promise<RunEvent[]> {
   try {
-    return parseRunEventLog(await readFile(join(runRoot(repositoryRoot, runId), "events.jsonl"), "utf8"));
+    const sqlite = await readSqliteRunProjection(repositoryRoot, runId);
+    if (sqlite) return parseRunEventLog(sqlite.eventsRaw);
+    const root = runRoot(repositoryRoot, runId);
+    const current = await readCurrentGeneration(root);
+    return parseRunEventLog(
+      current?.eventsRaw ?? await readFile(join(root, "events.jsonl"), "utf8"),
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new CliError(`run ${runId} has no events yet; start it with agr run`, 3, "RUN_NOT_FOUND");
@@ -353,7 +371,7 @@ function invalidEventLog(line: number, detail: string): CliError {
 }
 
 function runRoot(repositoryRoot: string, runId: string): string {
-  return join(repositoryRoot, ".agent-graph", "runs", runId);
+  return join(repositoryRoot, ".agent-graph", "runs", assertSafeRunId(runId));
 }
 
 function delay(milliseconds: number): Promise<void> {

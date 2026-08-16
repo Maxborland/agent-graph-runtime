@@ -1,5 +1,11 @@
 # Agent Graph Runtime — behavioral specification
 
+> This document defines the compatibility baseline. Implemented v0.7 and v1.0
+> additions are defined in the [v0.7 delivery specification](V0.7-DELIVERY-SPEC.md)
+> and [v1.0 delivery specification](V1.0-DELIVERY-SPEC.md). Architecture,
+> roadmap, and implementation-plan status labels distinguish implemented branch
+> behavior from an npm release or deployment.
+
 ## Goal
 
 Provide a local, resumable graph runtime that executes repository work through

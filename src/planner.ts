@@ -14,6 +14,9 @@ export interface PlannedNode {
   model?: string;
   requiredModelUsage?: GraphNodeDefinition["requiredModelUsage"];
   gate: boolean;
+  placement: "local" | "remote";
+  resources: NonNullable<GraphNodeDefinition["resources"]>;
+  capabilities: string[];
 }
 
 export interface ExecutionPlan {
@@ -60,6 +63,9 @@ export function buildExecutionPlan(
         ...(node.model === undefined ? {} : { model: node.model }),
         ...(node.requiredModelUsage === undefined ? {} : { requiredModelUsage: node.requiredModelUsage }),
         gate: node.type === "human_gate",
+        placement: node.placement ?? "local",
+        resources: node.resources ?? [],
+        capabilities: node.capabilities ?? [],
       })),
     });
     for (const node of ready) {

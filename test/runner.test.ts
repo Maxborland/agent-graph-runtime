@@ -9,6 +9,7 @@ import test from "node:test";
 import { NonRetryableAdapterError, type AgentAdapter } from "../src/adapters.js";
 import { OperatorControl } from "../src/operator-control.js";
 import { sendNodeProgress } from "../src/node-progress.js";
+import { sha256 } from "../src/persistence.js";
 import { GraphRunner } from "../src/runner.js";
 import type { AdapterRequest, GraphDefinition } from "../src/types.js";
 
@@ -28,8 +29,8 @@ test("runner executes dependencies through adapters and accepts verified nodes",
     async execute(request: AdapterRequest) {
       calls.push(request.node.id);
       const relative = request.node.id === "contract" ? "docs/contract.md" : "src/api.ts";
-      await mkdir(join(root, relative.split("/")[0]!), { recursive: true });
-      await writeFile(join(root, relative), `${request.node.id}\n`);
+      await mkdir(join(request.repositoryRoot, relative.split("/")[0]!), { recursive: true });
+      await writeFile(join(request.repositoryRoot, relative), `${request.node.id}\n`);
       return {
         exitCode: 0,
         stdout: "",
@@ -357,8 +358,8 @@ test("runner executes independent ownership sets concurrently", async () => {
       maxActive = Math.max(maxActive, active);
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
       const relative = `${request.node.id}/result.txt`;
-      await mkdir(join(root, request.node.id), { recursive: true });
-      await writeFile(join(root, relative), "done\n");
+      await mkdir(join(request.repositoryRoot, request.node.id), { recursive: true });
+      await writeFile(join(request.repositoryRoot, relative), "done\n");
       active -= 1;
       return {
         exitCode: 0,
@@ -492,7 +493,7 @@ test("durable failure events do not expose provider errors or check commands", a
     const events = await readFile(join(runRoot, "events.jsonl"), "utf8");
     assert.match(events, /"type":"node_failed"/);
     assert.doesNotMatch(events, /SENSITIVE_PROVIDER_RESULT/);
-    assert.match(await readFile(join(runRoot, "evidence", "agent-attempt-1.json"), "utf8"), /SENSITIVE_PROVIDER_RESULT/);
+    assert.match(await readFile(join(runRoot, state.nodes.agent!.evidenceFiles.at(-1)!), "utf8"), /SENSITIVE_PROVIDER_RESULT/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -577,6 +578,53 @@ test("runner accepts a verify-only node without an agent handoff", async () => {
     const state = await new GraphRunner(graph, root, {}).run();
     assert.equal(state.status, "completed");
     assert.equal(state.nodes.checks!.status, "accepted");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runner binds immutable hashed evidence to the unique current attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-attempt-evidence-"));
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  const graph: GraphDefinition = {
+    version: 1,
+    run: { id: "attempt-evidence", objective: "bind evidence", repository: ".", maxConcurrency: 1 },
+    nodes: [{
+      id: "checks",
+      type: "verify",
+      needs: [],
+      owns: [],
+      checks: [`${JSON.stringify(process.execPath)} -e "process.exit(0)"`],
+      maxAttempts: 1,
+    }],
+  };
+
+  try {
+    const state = await new GraphRunner(graph, root, {}).run();
+    const attemptId = state.nodes.checks!.currentAttemptId!;
+    const attempt = state.attempts[attemptId]!;
+    assert.equal(attempt.status, "accepted");
+    assert.equal(attempt.evidence.length, 1);
+    const evidence = attempt.evidence[0]!;
+    assert.equal(evidence.producerAttemptId, attemptId);
+    assert.match(evidence.localPath, new RegExp(`${attemptId}\\.json$`));
+    const raw = await readFile(join(root, ".agent-graph", "runs", graph.run.id, evidence.localPath));
+    assert.equal(evidence.size, raw.byteLength);
+    assert.equal(evidence.sha256, sha256(raw));
+    const document = JSON.parse(raw.toString("utf8")) as {
+      schemaVersion?: number;
+      attemptId?: string;
+      ordinal?: number;
+    };
+    assert.equal(document.schemaVersion, 1);
+    assert.equal(document.attemptId, attemptId);
+    assert.equal(document.ordinal, 1);
+    const report = await readFile(
+      join(root, ".agent-graph", "runs", graph.run.id, "report.md"),
+      "utf8",
+    );
+    assert.match(report, /Attempt history/);
+    assert.match(report, new RegExp(attemptId));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -733,7 +781,7 @@ test("runner accepts and persists matching required model usage", async () => {
     assert.equal(state.status, "completed");
     const evidence = JSON.parse(
       await readFile(
-        join(root, ".agent-graph", "runs", "model-usage-match", "evidence", "review-attempt-1.json"),
+        join(root, ".agent-graph", "runs", "model-usage-match", state.nodes.review!.evidenceFiles.at(-1)!),
         "utf8",
       ),
     ) as { modelUsage: Record<string, { provider: string; contextWindow: number }> };
@@ -885,7 +933,7 @@ test("partial and blocked handoffs stop for operator attention without automatic
       assert.equal(calls, 1);
       const evidence = JSON.parse(
         await readFile(
-          join(root, ".agent-graph", "runs", `${handoffStatus}-attention`, "evidence", "agent-attempt-1.json"),
+          join(root, ".agent-graph", "runs", `${handoffStatus}-attention`, state.nodes.agent!.evidenceFiles.at(-1)!),
           "utf8",
         ),
       ) as { retryBlocked?: boolean };
@@ -1073,7 +1121,8 @@ test("explicit retry clears semantic attention and allows a later complete hando
     const reset = await new OperatorControl(graph, root).retry("agent");
     assert.equal(reset.status, "running");
     assert.equal(reset.nodes.agent!.retryBlocked, undefined);
-    assert.equal(reset.nodes.agent!.attempts, 0);
+    assert.equal(reset.nodes.agent!.attempts, 1);
+    assert.equal(reset.nodes.agent!.generation, 1);
     assert.equal((await new GraphRunner(graph, root, { claudex: adapter }).run()).status, "completed");
     assert.equal(calls, 2);
   } finally {
