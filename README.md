@@ -7,6 +7,21 @@ dependencies, retries, path ownership, checks, evidence, and human approvals.
 
 Current status: working local v0.6.0, not published to npm.
 
+## Documentation
+
+- [Behavioral specification](docs/SPEC.md) — implemented v0.6 runtime contract
+  and acceptance mapping.
+- [Target architecture](docs/ARCHITECTURE.md) — proposed local-first,
+  provider-agnostic coordinator, Git transaction, worker trust, and authority
+  boundaries.
+- [Implementation roadmap](docs/ROADMAP.md) — evidence-gated v0.7-v1.0 outcome
+  sequence.
+- [Implementation plan](docs/IMPLEMENTATION_PLAN.md) — ordered work packages,
+  data contracts, module impact, migrations, and verification requirements.
+
+The architecture, roadmap, and implementation plan describe intended future
+work. They are not claims that the corresponding behavior exists in v0.6.
+
 ## Requirements
 
 - Node.js 22+, Git, and pnpm

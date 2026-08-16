@@ -1,5 +1,11 @@
 # Agent Graph Runtime — behavioral specification
 
+> This document defines implemented v0.6 behavior. Proposed future behavior is
+> kept separately in the [target architecture](ARCHITECTURE.md),
+> [implementation roadmap](ROADMAP.md), and
+> [implementation plan](IMPLEMENTATION_PLAN.md) so planned contracts are not
+> mistaken for shipped runtime guarantees.
+
 ## Goal
 
 Provide a local, resumable graph runtime that executes repository work through
