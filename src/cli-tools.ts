@@ -6,6 +6,7 @@ import { basename, dirname, delimiter, extname, join, relative, resolve } from "
 import { promisify } from "node:util";
 
 import { validateGraph } from "./graph.js";
+import { astraLunaNodes } from "./astra-luna-template.js";
 import { CliError } from "./cli-error.js";
 import { resolveSpawnCommand } from "./adapters.js";
 import {
@@ -139,7 +140,7 @@ export const graphSchema = {
 
 export async function initializeGraph(
   graphPath: string,
-  template: "minimal" | "codex-claudex",
+  template: "minimal" | "codex-claudex" | "astra-luna",
   repositoryRoot = process.cwd(),
 ): Promise<GraphDefinition> {
   const conventionalAlias =
@@ -147,7 +148,7 @@ export async function initializeGraph(
   const repository = conventionalAlias
     ? "."
     : (relative(dirname(graphPath), repositoryRoot).replaceAll("\\", "/") || ".");
-  const nodes: GraphNodeDefinition[] = template === "minimal"
+  const nodes: GraphNodeDefinition[] = template === "astra-luna" ? astraLunaNodes() : template === "minimal"
     ? [{ id: "verify", type: "verify", needs: [], owns: [], checks: [], maxAttempts: 1 }]
     : [
         { id: "implementation", type: "agent", executor: "codex", prompt: "Implement the requested change.", needs: [], owns: ["src/**", "test/**"], checks: [], maxAttempts: 1 },
@@ -159,7 +160,7 @@ export async function initializeGraph(
       id: `run-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
       objective: "Replace with the user-visible outcome",
       repository,
-      maxConcurrency: 1,
+      maxConcurrency: template === "astra-luna" ? 2 : 1,
     },
     nodes,
   };
