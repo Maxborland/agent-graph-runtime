@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import { NonRetryableAdapterError, type AgentAdapter } from "./adapters.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { buildCodeContext } from "./context.js";
+import { buildDependencyContext, DependencyContextError } from "./dependency-context.js";
 import { validateGraph } from "./graph.js";
 import {
   findUnexpectedChanges,
@@ -248,7 +249,7 @@ export class GraphRunner {
     const codeContext = this.graph.run.codeGraph
       ? await buildCodeContext(node, this.repositoryRoot, this.options.codeGraphCommand ?? "codegraph", signal)
       : { available: false, text: "", sources: [] as string[] };
-    const prompt = buildPrompt(
+    let prompt = buildPrompt(
       this.graph,
       node,
       codeContext.text,
@@ -273,6 +274,11 @@ export class GraphRunner {
       }
       const adapter = node.executor ? this.adapters[node.executor] : undefined;
       if (!adapter) throw new Error(`executor "${node.executor ?? "none"}" is unavailable`);
+      const dependencyContext = await buildDependencyContext(node, store);
+      if (dependencyContext) {
+        prompt += `\n${dependencyContext}\n`;
+        await writeFile(promptPath, prompt, "utf8");
+      }
       const progressChannel = await createNodeProgressChannel(
         this.graph.run.id,
         node.id,
@@ -327,7 +333,7 @@ export class GraphRunner {
         checks: [],
         error: messageOf(error),
         aborted: error instanceof Error && error.name === "AbortError",
-        retryBlocked: error instanceof NonRetryableAdapterError,
+        retryBlocked: error instanceof NonRetryableAdapterError || error instanceof DependencyContextError,
       };
     }
   }

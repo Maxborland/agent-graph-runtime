@@ -102,10 +102,10 @@ async function main(args: string[]): Promise<void> {
     const pathArgument = positional(args.slice(1))[0];
     const graphPath = resolve(pathArgument ?? defaultGraphPath);
     const template = optionValue(args, "--template") ?? "minimal";
-    if (!(["minimal", "codex-claudex"] as string[]).includes(template)) {
+    if (!(["minimal", "codex-claudex", "astra-luna"] as string[]).includes(template)) {
       throw new CliError(`unknown template "${template}"`, 3, "INVALID_ARGUMENT");
     }
-    const graph = await initializeGraph(graphPath, template as "minimal" | "codex-claudex", process.cwd()).catch((error: unknown) => {
+    const graph = await initializeGraph(graphPath, template as "minimal" | "codex-claudex" | "astra-luna", process.cwd()).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         throw new CliError(`refusing to overwrite ${graphPath}`, 3, "FILE_EXISTS");
       }
@@ -562,7 +562,7 @@ function printHelp(): void {
   console.log(`Agent Graph Runtime
 
 Usage:
-  agr init [GRAPH] [--template minimal|codex-claudex]
+  agr init [GRAPH] [--template minimal|codex-claudex|astra-luna]
   agr validate [GRAPH]
   agr plan [GRAPH] [--json]
   agr doctor [GRAPH]

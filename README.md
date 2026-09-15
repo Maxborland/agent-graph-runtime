@@ -117,6 +117,19 @@ proxy-routed launcher, and
 [skills/agent-graph-runtime/references/graph-format.md](skills/agent-graph-runtime/references/graph-format.md)
 for the complete graph format.
 
+## Astra / Luna workflow
+
+`agr init --template astra-luna` creates an explicit Codex graph with Astra
+planning, Luna exploration and research in parallel, Luna implementation, Luna
+test authoring, deterministic tests, independent Astra review, final Astra
+acceptance, and a final deterministic test run. See
+[the workflow guide](docs/astra-luna.md) for setup, routing, and retry behavior.
+
+Direct dependency handoffs and check exit codes are loaded from their current
+accepted evidence into each downstream agent prompt, including after resume.
+These are bounded excerpts with full evidence paths, not shared conversation
+memory or new permissions. Raw process and check output is not injected.
+
 ## Runtime contract
 
 - `codex` nodes use `codex exec`, JSON schema output, and Codex sandboxing.
