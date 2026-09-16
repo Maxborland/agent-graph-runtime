@@ -5,6 +5,12 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { ObservedExecution } from "./types.js";
 
+export class CodexSessionExecutionChangedError extends Error {
+  constructor(readonly previousExecution: ObservedExecution, readonly observedExecution: ObservedExecution) {
+    super("Codex session reported changing effective model or reasoning effort");
+  }
+}
+
 /** Read only the rollout belonging to the thread captured from this invocation. */
 export async function readCodexSessionExecution(
   threadId: string,
@@ -60,7 +66,11 @@ export async function readCodexSessionExecution(
         const effort = typeof payload.effort === "string" && payload.effort ? payload.effort : undefined;
         if (observed && ((model && observed.model && model !== observed.model) ||
           (effort && observed.reasoningEffort && effort !== observed.reasoningEffort))) {
-          throw new Error("Codex session reported changing effective model or reasoning effort");
+          throw new CodexSessionExecutionChangedError(observed, {
+            ...observed,
+            ...(model === undefined ? {} : { model }),
+            ...(effort === undefined ? {} : { reasoningEffort: effort }),
+          });
         }
         observed = {
           threadId,

@@ -131,8 +131,8 @@ export const graphSchema = {
           {
             if: { required: ["reasoningEffort"] },
             then: {
-              properties: { executor: { const: "codex" } },
-              required: ["executor"],
+              properties: { executor: { const: "codex" }, type: { enum: ["agent", "review", "external_action"] } },
+              required: ["executor", "type"],
             },
           },
           {

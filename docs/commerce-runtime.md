@@ -33,7 +33,7 @@ reads only the exact thread rollout from the local Codex sessions directory,
 verifying its ID, repository, and invocation time. It copies no prompt or
 reasoning text. Missing provider metadata stays unknown; it is not proof of
 the configured setting. Observed mismatches block retries and retain evidence.
-Handoff prose is not execution metadata.
+Session metadata is checked even after a nonzero provider exit. If settings change within a session, both conflicting observations are retained and automatic retry is blocked. Handoff prose is not execution metadata.
 
 See [the runnable example](../examples/commerce-reviews.graph.json). Give each
 new graph contract a new `run.id`; an existing run cannot resume with changed

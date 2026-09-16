@@ -12,7 +12,7 @@ import type {
   ModelUsageEvidence,
   ObservedExecution,
 } from "./types.js";
-import { readCodexSessionExecution } from "./codex-session.js";
+import { CodexSessionExecutionChangedError, readCodexSessionExecution } from "./codex-session.js";
 import { reasoningEfforts } from "./types.js";
 
 const outputSchema = {
@@ -140,14 +140,13 @@ export class CodexAdapter implements AgentAdapter {
     );
     if (processResult.terminationError) throw processResult.terminationError;
     if (executionMismatch) throw executionMismatch;
-    if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
-      throw processFailure("Codex", processResult);
-    }
+    if (processResult.aborted) throw processFailure("Codex", processResult);
     if (
       observedExecution?.threadId &&
       (observedExecution.model === undefined || observedExecution.reasoningEffort === undefined)
     ) {
       let sessionExecution: ObservedExecution | undefined;
+      let conflictingObservations: ObservedExecution[] | undefined;
       try {
         sessionExecution = await readCodexSessionExecution(
           observedExecution.threadId,
@@ -157,8 +156,13 @@ export class CodexAdapter implements AgentAdapter {
           request.environment,
         );
       } catch (error) {
-        if (error instanceof Error && /changing effective model or reasoning effort/i.test(error.message)) {
-          throw new NonRetryableAdapterError(`Codex session evidence is inconsistent: ${error.message}`);
+        if (error instanceof CodexSessionExecutionChangedError) {
+          sessionExecution = error.observedExecution;
+          conflictingObservations = [error.previousExecution, error.observedExecution];
+          executionMismatch = new ExecutionEvidenceMismatchError(
+            error.message + ": " + JSON.stringify(conflictingObservations),
+            configuredExecution, error.observedExecution,
+          );
         }
       }
       if (sessionExecution?.threadId === observedExecution.threadId) {
@@ -170,10 +174,12 @@ export class CodexAdapter implements AgentAdapter {
           request.node.id,
           hasConfiguredExecution ? configuredExecution : undefined,
           observedExecution,
+          conflictingObservations,
         );
       }
     }
     if (executionMismatch) throw executionMismatch;
+    if (processResult.timedOut || processResult.exitCode !== 0) throw processFailure("Codex", processResult);
     const raw = await readFile(outputPath, "utf8");
     return {
       ...processResult,
@@ -767,6 +773,7 @@ async function writeCodexExecutionEvidence(
   nodeId: string,
   configuredExecution: ConfiguredExecution | undefined,
   observedExecution: ObservedExecution | undefined,
+  conflictingObservations?: ObservedExecution[],
 ): Promise<void> {
   if (configuredExecution === undefined && observedExecution === undefined) return;
   await writeFile(
@@ -774,6 +781,7 @@ async function writeCodexExecutionEvidence(
     `${JSON.stringify({
       configuredExecution: configuredExecution ?? null,
       observedExecution: observedExecution ?? null,
+      ...(conflictingObservations ? { conflictingObservations } : {}),
     }, null, 2)}\n`,
     "utf8",
   );

@@ -1125,7 +1125,7 @@ test("cancellation persists deterministic check output for reconciliation", asyn
   const checkScript = join(root, "check.mjs");
   await writeFile(
     checkScript,
-    `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(startedPath)}, "started"); console.log("CHECK_STARTED"); setTimeout(() => {}, 10000);`,
+    `import { writeFileSync } from "node:fs"; process.stdout.write("CHECK_STARTED\\n", () => writeFileSync(${JSON.stringify(startedPath)}, "started")); setTimeout(() => {}, 10000);`,
     "utf8",
   );
   const graph: GraphDefinition = {

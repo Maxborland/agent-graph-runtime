@@ -299,3 +299,46 @@ console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
     assert.equal(evidence.observedExecution.reasoningEffort, "high");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const mode of ["nonzero-mismatch", "changed-session", "transient-mismatch"] as const) {
+  test(`session fallback preserves terminal evidence for ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agr-session-failure-"));
+    const efforts = mode === "nonzero-mismatch" ? ["high"] : mode === "changed-session" ? ["max", "high"] : ["high", "max"];
+    const fake = await writeCodexFixture(root, `
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const id = "aaaaaaaa-1111-2222-3333-cccccccccccc";
+const timestamp = new Date().toISOString();
+const directory = join(process.env.CODEX_HOME, "sessions", ...timestamp.slice(0, 10).split("-"));
+mkdirSync(directory, { recursive: true });
+const records = [{ type: "session_meta", timestamp, payload: { id, cwd: process.cwd(), timestamp } },
+  ...${JSON.stringify(efforts)}.map(effort => ({ type: "turn_context", timestamp, payload: { cwd: process.cwd(), model: "gpt-5.6-luna", effort } }))];
+writeFileSync(join(directory, "rollout-test-" + id + ".jsonl"), records.map(value => JSON.stringify(value)).join("\\n") + "\\n");
+console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
+process.exitCode = ${mode === "nonzero-mismatch" ? 13 : 0};
+`);
+    try {
+      await assert.rejects(new CodexAdapter(process.execPath, [fake]).execute({
+        ...request(root, fake), environment: { CODEX_HOME: join(root, "codex-home") },
+      }), (error: unknown) => {
+        assert.ok(error instanceof ExecutionEvidenceMismatchError);
+        assert.equal(error.observedExecution.reasoningEffort, efforts.at(-1));
+        assert.equal(error.configuredExecution.reasoningEffort, "max");
+        return true;
+      });
+      const evidence = JSON.parse(await readFile(join(root, "artifacts/reasoning.execution.json"), "utf8"));
+      assert.equal(evidence.observedExecution.reasoningEffort, efforts.at(-1));
+      if (efforts.length > 1) assert.deepEqual(evidence.conflictingObservations.map((value: { reasoningEffort: string }) => value.reasoningEffort), efforts);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test("published schema limits effort to dispatched Codex node types", () => {
+  const clauses = graphSchema.properties.nodes.items.allOf as readonly {
+    if: { required: readonly string[] };
+    then: { properties?: { type?: { enum: readonly string[] } }; required?: readonly string[] };
+  }[];
+  const effort = clauses.find(clause => clause.if.required.includes("reasoningEffort"));
+  assert.deepEqual(effort?.then.properties?.type?.enum, ["agent", "review", "external_action"]);
+  assert.ok(effort?.then.required?.includes("type"));
+});
