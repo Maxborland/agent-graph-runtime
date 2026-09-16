@@ -127,7 +127,8 @@ async function main(args: string[]): Promise<void> {
       console.log(`Run ${plan.runId}: ${plan.objective}`);
       console.log(`Repository: ${plan.repositoryRoot}`);
       console.log(`External actions: ${plan.allowExternalActions ? "enabled with exact gate" : "disabled"}`);
-      if (plan.advisor) console.log(`Advisor: ${plan.advisor.executor}${plan.advisor.model ? `/${plan.advisor.model}` : ""}${plan.advisor.stopOnBlocker === false ? " (non-blocking)" : " (stops on blocker)"}`);
+      if (plan.semanticFailurePolicy) console.log(`Semantic failure policy: ${plan.semanticFailurePolicy}`);
+      if (plan.advisor) console.log(`Advisor: ${plan.advisor.executor}${plan.advisor.model ? `/${plan.advisor.model}` : ""}${plan.advisor.reasoningEffort ? ` effort=${plan.advisor.reasoningEffort}` : ""}${plan.advisor.stopOnBlocker === false ? " (non-blocking)" : " (stops on blocker)"}`);
       for (const wave of plan.waves) {
         console.log(`  wave ${wave.index}`);
         for (const node of wave.nodes) {
@@ -136,6 +137,8 @@ async function main(args: string[]): Promise<void> {
           console.log(`      owns: ${[...node.owns, ...node.implicitOutputs].join(", ") || "read-only"}`);
           console.log(`      checks: ${node.checks.join(" | ") || "none"}`);
           if (node.target) console.log(`      target: ${node.target}`);
+          if (node.model) console.log(`      model: ${node.model}`);
+          if (node.reasoningEffort) console.log(`      reasoning effort: ${node.reasoningEffort}`);
           if (node.requiredModelUsage) {
             console.log(`      model evidence: ${node.requiredModelUsage.map((usage) => `${usage.model}@${usage.provider}/${usage.contextWindow}`).join(", ")}`);
           }

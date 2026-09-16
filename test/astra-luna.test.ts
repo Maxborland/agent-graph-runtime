@@ -127,7 +127,8 @@ process.stdin.on('end', () => {
     changedFiles = ['test/add.test.cjs'];
   }
   if (['reviewer', 'integrate'].includes(id)) {
-    assert.ok(prompt.includes('Dependency test-checks (accepted attempt 1)'));
+    const expectedAttempt = require('node:path').basename(require('node:path').dirname(option('--output-last-message'))).split('-attempt-').pop();
+    assert.ok(prompt.includes('Dependency test-checks (accepted attempt ' + expectedAttempt + ')'));
     assert.ok(prompt.includes('"exitCode":0'));
     assert.ok(fs.readFileSync('test/add.test.cjs', 'utf8').includes('add(-2, 2)'));
   }
@@ -155,6 +156,8 @@ process.stdin.on('end', () => {
     assert.equal(final.status, "completed");
     assert.deepEqual(calls.slice(before.length), ["worker", "tester", "reviewer", "integrate"]);
     assert.equal(final.nodes["final-checks"]!.status, "accepted");
+    assert.equal(final.nodes["final-checks"]!.attempts, 2);
+    assert.deepEqual(JSON.parse(await readFile(join(runRoot, "evidence", "final-checks-attempt-1.json"), "utf8")), evidence);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -184,7 +187,8 @@ test("damaged dependency evidence stops before dispatch without spending automat
     await writeFile(path, '{"truncated":');
     const state = await createRunner().run();
     assert.equal(state.status, "needs_attention");
-    assert.equal(state.nodes.consumer!.attempts, 1);
+    assert.equal(state.nodes.consumer!.attempts, 2);
+    assert.equal(state.nodes.consumer!.generationAttempts, 1);
     assert.equal(state.nodes.consumer!.retryBlocked, true);
     assert.deepEqual(calls, ["source", "consumer"]);
     assert.equal((await createRunner().run()).status, "needs_attention");

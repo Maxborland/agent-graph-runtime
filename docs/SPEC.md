@@ -577,3 +577,13 @@ Traceable test plan:
 - AC26 → adapter argv prevents Workflow, the runtime prompt makes the node
   boundary explicit, and the KISS-PM consumer graph uses direct executor nodes
   in a dedicated checkout without concurrent writers.
+
+
+### Explicit execution and retry evidence (Commerce integration)
+
+- Codex node/advisor effort is validated, appears in plan/schema, and is passed after the exec subcommand. Configured settings and observed execution metadata remain separate; observed mismatches require operator attention.
+- Manual retry renews only the automatic retry budget. Attempt artifact identities increase across retries; historical files survive, and dependency context selects only the current accepted attempt.
+- The opt-in finish-independent-read-only policy retains already-running read-only review/check evidence after semantic findings. The finding and needs_attention remain; no new wave or advisor starts. Cancellation, ownership escape and unconfirmed termination stop peers.
+- Deterministic acceptance coverage: reasoning-effort.test.ts, codex-session.test.ts, retry-history.test.ts, semantic-policy.test.ts, plus existing runner/operator/dependency suites. Native Codex smoke is separate from these fixtures.
+
+See [configuration and compatibility details](commerce-runtime.md).

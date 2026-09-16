@@ -1073,7 +1073,8 @@ test("explicit retry clears semantic attention and allows a later complete hando
     const reset = await new OperatorControl(graph, root).retry("agent");
     assert.equal(reset.status, "running");
     assert.equal(reset.nodes.agent!.retryBlocked, undefined);
-    assert.equal(reset.nodes.agent!.attempts, 0);
+    assert.equal(reset.nodes.agent!.attempts, 1);
+    assert.equal(reset.nodes.agent!.generationAttempts, 0);
     assert.equal((await new GraphRunner(graph, root, { claudex: adapter }).run()).status, "completed");
     assert.equal(calls, 2);
   } finally {
@@ -1124,7 +1125,7 @@ test("cancellation persists deterministic check output for reconciliation", asyn
   const checkScript = join(root, "check.mjs");
   await writeFile(
     checkScript,
-    `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(startedPath)}, "started"); console.log("CHECK_STARTED"); setTimeout(() => {}, 10000);`,
+    `import { writeFileSync } from "node:fs"; process.stdout.write("CHECK_STARTED\\n", () => writeFileSync(${JSON.stringify(startedPath)}, "started")); setTimeout(() => {}, 10000);`,
     "utf8",
   );
   const graph: GraphDefinition = {

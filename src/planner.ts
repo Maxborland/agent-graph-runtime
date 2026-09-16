@@ -12,6 +12,7 @@ export interface PlannedNode {
   maxAttempts: number;
   timeoutMs?: number;
   model?: string;
+  reasoningEffort?: GraphNodeDefinition["reasoningEffort"];
   requiredModelUsage?: GraphNodeDefinition["requiredModelUsage"];
   gate: boolean;
 }
@@ -22,6 +23,7 @@ export interface ExecutionPlan {
   repositoryRoot: string;
   maxConcurrency: number;
   allowExternalActions: boolean;
+  semanticFailurePolicy?: GraphDefinition["run"]["semanticFailurePolicy"];
   advisor?: GraphDefinition["run"]["advisor"];
   waves: Array<{ index: number; nodes: PlannedNode[] }>;
 }
@@ -58,6 +60,7 @@ export function buildExecutionPlan(
         maxAttempts: node.maxAttempts,
         ...(node.timeoutMs === undefined ? {} : { timeoutMs: node.timeoutMs }),
         ...(node.model === undefined ? {} : { model: node.model }),
+        ...(node.reasoningEffort === undefined ? {} : { reasoningEffort: node.reasoningEffort }),
         ...(node.requiredModelUsage === undefined ? {} : { requiredModelUsage: node.requiredModelUsage }),
         gate: node.type === "human_gate",
       })),
@@ -74,6 +77,7 @@ export function buildExecutionPlan(
     repositoryRoot,
     maxConcurrency: graph.run.maxConcurrency,
     allowExternalActions: graph.run.allowExternalActions ?? false,
+    ...(graph.run.semanticFailurePolicy === undefined ? {} : { semanticFailurePolicy: graph.run.semanticFailurePolicy }),
     ...(graph.run.advisor === undefined ? {} : { advisor: graph.run.advisor }),
     waves,
   };

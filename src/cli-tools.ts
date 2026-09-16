@@ -13,6 +13,7 @@ import {
   readRunEventArtifact,
   readRunStateArtifact,
 } from "./observation.js";
+import { reasoningEfforts } from "./types.js";
 import type { ExecutorName, GraphDefinition, GraphNodeDefinition, RunEvent, RunState } from "./types.js";
 
 const exec = promisify(execFile);
@@ -36,6 +37,7 @@ export const graphSchema = {
         maxConcurrency: { type: "integer", minimum: 1 },
         allowExternalActions: { type: "boolean" },
         codeGraph: { type: "boolean" },
+        semanticFailurePolicy: { enum: ["stop", "finish-independent-read-only"] },
         advisor: {
           type: "object",
           additionalProperties: false,
@@ -43,12 +45,19 @@ export const graphSchema = {
           properties: {
             executor: { enum: ["codex", "claude", "claudex"] },
             model: { type: "string", minLength: 1 },
+            reasoningEffort: { enum: reasoningEfforts },
             instructions: { type: "string", maxLength: 4_000 },
             stopOnBlocker: { type: "boolean" },
           },
           allOf: [{
             if: { properties: { executor: { const: "claudex" } }, required: ["executor"] },
             then: { not: { required: ["model"] } },
+          }, {
+            if: { required: ["reasoningEffort"] },
+            then: {
+              properties: { executor: { const: "codex" }, type: { enum: ["agent", "review", "external_action"] } },
+              required: ["executor"],
+            },
           }],
         },
       },
@@ -72,6 +81,7 @@ export const graphSchema = {
           maxAttempts: { type: "integer", minimum: 1 },
           timeoutMs: { type: "integer", minimum: 1 },
           model: { type: "string" },
+          reasoningEffort: { enum: reasoningEfforts },
           requiredModelUsage: {
             type: "array",
             minItems: 1,
@@ -117,6 +127,13 @@ export const graphSchema = {
           {
             if: { properties: { type: { const: "external_action" } }, required: ["type"] },
             then: { required: ["executor"] },
+          },
+          {
+            if: { required: ["reasoningEffort"] },
+            then: {
+              properties: { executor: { const: "codex" }, type: { enum: ["agent", "review", "external_action"] } },
+              required: ["executor", "type"],
+            },
           },
           {
             if: { properties: { executor: { const: "claudex" } }, required: ["executor"] },

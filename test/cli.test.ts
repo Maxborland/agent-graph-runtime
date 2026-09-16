@@ -325,8 +325,8 @@ test("CLI advisor acknowledge clears only the run-level advisor blocker", async 
     const state = JSON.parse(stdout) as { status: string; advisor?: { blocker?: unknown }; nodes: Record<string, { attempts: number; status: string }> };
     assert.equal(state.status, "running");
     assert.equal(state.advisor?.blocker, undefined);
-    assert.deepEqual(state.nodes.first, { status: "accepted", attempts: 1, evidenceFiles: [] });
-    assert.deepEqual(state.nodes.second, { status: "pending", attempts: 0, evidenceFiles: [] });
+    assert.deepEqual(state.nodes.first, { status: "accepted", attempts: 1, evidenceFiles: [], generationAttempts: 1, attemptHighWater: 1, acceptedAttempt: 1 });
+    assert.deepEqual(state.nodes.second, { status: "pending", attempts: 0, evidenceFiles: [], generationAttempts: 0, attemptHighWater: 0 });
     assert.match(await readFile(join(runRoot, "events.jsonl"), "utf8"), /"type":"advisor_acknowledged"/);
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

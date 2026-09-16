@@ -1,7 +1,7 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-import { NonRetryableAdapterError, type AgentAdapter } from "./adapters.js";
+import { ExecutionEvidenceMismatchError, NonRetryableAdapterError, type AgentAdapter } from "./adapters.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { buildCodeContext } from "./context.js";
 import { buildDependencyContext, DependencyContextError } from "./dependency-context.js";
@@ -16,7 +16,7 @@ import {
 import { writeRunReport } from "./report.js";
 import { RunLifecycle } from "./lifecycle.js";
 import { PassiveAdvisor } from "./advisor.js";
-import { RunStore } from "./store.js";
+import { RunStore, writeImmutableArtifact } from "./store.js";
 import { createNodeProgressChannel, type NodeProgressMilestone } from "./node-progress.js";
 import type {
   AdapterResult,
@@ -69,6 +69,8 @@ interface NodeOutcome {
   node: GraphNodeDefinition;
   prompt: string;
   adapterResult?: AdapterResult;
+  configuredExecution?: AdapterResult["configuredExecution"];
+  observedExecution?: AdapterResult["observedExecution"];
   checks: CheckResult[];
   error?: string;
   aborted?: boolean;
@@ -171,13 +173,22 @@ export class GraphRunner {
       }
       await store.save("wave-started");
 
+      const waveOwnership = [
+        ".agent-graph/**",
+        ...ready.flatMap((node) => [...node.owns, ...(node.implicitOutputs ?? [])]),
+      ];
       const waveStartedAt = Date.now();
       const activeNodeIds = new Set(ready.map((node) => node.id));
       const waveController = new AbortController();
       const forwardExternalAbort = (): void => waveController.abort();
       this.options.signal?.addEventListener("abort", forwardExternalAbort, { once: true });
       if (this.options.signal?.aborted) forwardExternalAbort();
+      // A mixed wave can have uncertain write/external effects. Retention is
+      // allowed only when every launched member has a read-only contract.
+      const retainReadOnly = this.graph.run.semanticFailurePolicy === "finish-independent-read-only" &&
+        ready.every(isReadOnlyPeer);
       let waveAttentionObserved = false;
+      const earlyEscapedPaths = new Set<string>();
       const heartbeat = setInterval(() => {
         this.emitProgress({
           type: "heartbeat",
@@ -197,10 +208,35 @@ export class GraphRunner {
           ready.map(async (node) => {
             try {
               const outcome = await this.executeNode(node, store, waveController.signal);
-              if (outcomeRequiresAttention(outcome)) {
+              const claimedEscapes = claimedOwnershipEscapes(outcome);
+              if (outcome.retryBlocked || outcome.aborted || claimedEscapes.length) {
                 waveAttentionObserved = true;
                 waveController.abort();
+              }
+              // Inspect before deciding to retain a peer: a semantic finding is
+              // not safe merely because its handoff labels it blocked/partial.
+              if (!waveController.signal.aborted) {
+                try {
+                  const escaped = await findUnexpectedChanges(
+                    this.repositoryRoot, waveBaseline, waveOwnership, this.options.signal,
+                  );
+                  for (const path of escaped) earlyEscapedPaths.add(path);
+                } catch (error) {
+                  earlyEscapedPaths.add("<ownership inspection failed: " + messageOf(error) + ">");
+                }
+              }
+              const unsafe = Boolean(outcome.retryBlocked || outcome.aborted ||
+                claimedEscapes.length || earlyEscapedPaths.size ||
+                (retainReadOnly && outcome.error));
+              if (unsafe || (outcomeRequiresAttention(outcome) && !retainReadOnly)) {
+                waveAttentionObserved = true;
+                outcome.retryBlocked = true;
+                waveController.abort();
               } else if (waveAttentionObserved) {
+                outcome.retryBlocked = true;
+                outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
+              }
+              if (waveController.signal.aborted && !outcomeRequiresAttention(outcome)) {
                 outcome.retryBlocked = true;
                 outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
               }
@@ -215,10 +251,6 @@ export class GraphRunner {
         this.options.signal?.removeEventListener("abort", forwardExternalAbort);
       }
       if (this.options.signal?.aborted) return this.cancelRun(store, outcomes);
-      const waveOwnership = [
-        ".agent-graph/**",
-        ...ready.flatMap((node) => [...node.owns, ...(node.implicitOutputs ?? [])]),
-      ];
       let escapedPaths: string[] = [];
       try {
         escapedPaths = await findUnexpectedChanges(
@@ -232,11 +264,12 @@ export class GraphRunner {
       }
       if (this.options.signal?.aborted) return this.cancelRun(store, outcomes);
 
+      escapedPaths = [...new Set([...escapedPaths, ...earlyEscapedPaths])];
       for (const outcome of outcomes) {
         await this.acceptOutcome(outcome, escapedPaths, store);
       }
       await store.save("wave-finished");
-      await advisor.reviewWave(store);
+      if (!lifecycle.attentionRequired()) await advisor.reviewWave(store);
     }
   }
 
@@ -260,25 +293,33 @@ export class GraphRunner {
       store.promptsDirectory,
       `${node.id}-attempt-${store.state.nodes[node.id]!.attempts}.md`,
     );
-    await writeFile(promptPath, prompt, "utf8");
-
+    const artifactsDirectory = join(store.outputsDirectory, node.id + "-attempt-" + store.state.nodes[node.id]!.attempts);
+    let externalActionStarted = false;
     try {
+      // Exclusive reservation prevents raw output reuse even if an artifact
+      // appears after the legacy high-water scan.
+      await mkdir(artifactsDirectory);
+      if (node.type !== "verify" && node.executor !== "shell") {
+        const dependencyContext = await buildDependencyContext(node, store);
+        if (dependencyContext) prompt += `\n${dependencyContext}\n`;
+      }
+      // Publish only the final prompt; even dependency enrichment cannot replace it.
+      await writeFile(promptPath, prompt, { encoding: "utf8", flag: "wx" });
       if (node.type === "verify") {
         const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
-        return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError)) };
+        return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
       }
-      if (node.type === "external_action") new RunLifecycle(this.graph, store.state).assertExternalActionAuthorized(node.id);
+      if (node.type === "external_action") {
+        new RunLifecycle(this.graph, store.state).assertExternalActionAuthorized(node.id);
+        externalActionStarted = true;
+      }
       if (node.executor === "shell") {
         const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
-        return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError)) };
+        return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
       }
       const adapter = node.executor ? this.adapters[node.executor] : undefined;
       if (!adapter) throw new Error(`executor "${node.executor ?? "none"}" is unavailable`);
-      const dependencyContext = await buildDependencyContext(node, store);
-      if (dependencyContext) {
-        prompt += `\n${dependencyContext}\n`;
-        await writeFile(promptPath, prompt, "utf8");
-      }
+
       const progressChannel = await createNodeProgressChannel(
         this.graph.run.id,
         node.id,
@@ -307,10 +348,7 @@ export class GraphRunner {
           node,
           repositoryRoot: this.repositoryRoot,
           prompt,
-          artifactsDirectory: join(
-            store.outputsDirectory,
-            `${node.id}-attempt-${store.state.nodes[node.id]!.attempts}`,
-          ),
+          artifactsDirectory,
           timeoutMs,
           signal,
           ...(progressChannel ? { environment: progressChannel.environment } : {}),
@@ -325,15 +363,19 @@ export class GraphRunner {
         await progressChannel?.close().catch(() => undefined);
       }
       const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
-      return { node, prompt, adapterResult, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError)) };
+      return { node, prompt, adapterResult, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
     } catch (error) {
       return {
         node,
         prompt,
         checks: [],
         error: messageOf(error),
+        ...(error instanceof ExecutionEvidenceMismatchError ? {
+          configuredExecution: error.configuredExecution,
+          observedExecution: error.observedExecution,
+        } : {}),
         aborted: error instanceof Error && error.name === "AbortError",
-        retryBlocked: error instanceof NonRetryableAdapterError || error instanceof DependencyContextError,
+        retryBlocked: externalActionStarted || error instanceof NonRetryableAdapterError || error instanceof DependencyContextError,
       };
     }
   }
@@ -345,9 +387,7 @@ export class GraphRunner {
   ): Promise<void> {
     const nodeState = store.state.nodes[outcome.node.id]!;
     const ownership = [...outcome.node.owns, ...(outcome.node.implicitOutputs ?? [])];
-    const claimedEscapes = (outcome.adapterResult?.handoff.changedFiles ?? []).filter(
-      (file) => !ownership.some((pattern) => matchesGlob(file, pattern)),
-    );
+    const claimedEscapes = claimedOwnershipEscapes(outcome);
     const failedChecks = outcome.checks.filter((check) => check.exitCode !== 0);
     const modelUsageFailures = requiredModelUsageFailures(
       outcome.node,
@@ -361,7 +401,8 @@ export class GraphRunner {
       : undefined;
     const semanticAttention = outcome.adapterResult?.handoff.status === "partial" ||
       outcome.adapterResult?.handoff.status === "blocked";
-    const retryBlocked = Boolean(outcome.retryBlocked || semanticAttention);
+    const retryBlocked = Boolean(outcome.retryBlocked || semanticAttention ||
+      waveEscapedPaths.length || claimedEscapes.length);
     const failures = [
       outcome.error,
       handoffFailure,
@@ -376,7 +417,7 @@ export class GraphRunner {
 
     const attempt = nodeState.attempts;
     const evidencePath = join(store.evidenceDirectory, `${outcome.node.id}-attempt-${attempt}.json`);
-    await writeFile(
+    await writeImmutableArtifact(
       evidencePath,
       `${JSON.stringify(
         {
@@ -388,6 +429,8 @@ export class GraphRunner {
             ? { exitCode: outcome.adapterResult.exitCode }
             : null,
           modelUsage: outcome.adapterResult?.modelUsage ?? null,
+          configuredExecution: outcome.adapterResult?.configuredExecution ?? outcome.configuredExecution ?? (outcome.node.executor === 'codex' ? { model: outcome.node.model, reasoningEffort: outcome.node.reasoningEffort } : null),
+          observedExecution: outcome.adapterResult?.observedExecution ?? outcome.observedExecution ?? null,
           retryBlocked,
           checks: outcome.checks,
           ownership: { declared: ownership, waveEscapedPaths, claimedEscapes },
@@ -396,7 +439,6 @@ export class GraphRunner {
         null,
         2,
       )}\n`,
-      "utf8",
     );
     nodeState.evidenceFiles.push(relative(store.runDirectory, evidencePath).replaceAll("\\", "/"));
     if (failures.length === 0) {
@@ -460,7 +502,7 @@ export class GraphRunner {
       const outcome = byNode.get(nodeId);
       if (outcome) {
         const evidencePath = join(store.evidenceDirectory, `${nodeId}-attempt-${node.attempts}.json`);
-        await writeFile(
+        await writeImmutableArtifact(
           evidencePath,
           `${JSON.stringify({
             nodeId,
@@ -469,6 +511,8 @@ export class GraphRunner {
             handoff: outcome.adapterResult?.handoff ?? null,
             agentProcess: outcome.adapterResult ? { exitCode: outcome.adapterResult.exitCode } : null,
             modelUsage: outcome.adapterResult?.modelUsage ?? null,
+            configuredExecution: outcome.adapterResult?.configuredExecution ?? outcome.configuredExecution ?? (outcome.node.executor === 'codex' ? { model: outcome.node.model, reasoningEffort: outcome.node.reasoningEffort } : null),
+            observedExecution: outcome.adapterResult?.observedExecution ?? outcome.observedExecution ?? null,
             retryBlocked: true,
             checks: outcome.checks,
             ownership: {
@@ -478,7 +522,6 @@ export class GraphRunner {
             },
             failures: ["cancelled during execution; partial effects require reconciliation"],
           }, null, 2)}\n`,
-          "utf8",
         );
         const relativeEvidencePath = relative(store.runDirectory, evidencePath).replaceAll("\\", "/");
         if (!node.evidenceFiles.includes(relativeEvidencePath)) node.evidenceFiles.push(relativeEvidencePath);
@@ -497,6 +540,18 @@ export class GraphRunner {
     return store.state;
   }
 
+}
+
+function isReadOnlyPeer(node: GraphNodeDefinition): boolean {
+  return (node.type === "verify" || (node.type === "review" && node.executor !== "shell")) &&
+    node.owns.length === 0 && (node.implicitOutputs?.length ?? 0) === 0;
+}
+
+function claimedOwnershipEscapes(outcome: NodeOutcome): string[] {
+  const ownership = [...outcome.node.owns, ...(outcome.node.implicitOutputs ?? [])];
+  return (outcome.adapterResult?.handoff.changedFiles ?? []).filter(
+    (file) => !ownership.some((pattern) => matchesGlob(file, pattern)),
+  );
 }
 
 function outcomeRequiresAttention(outcome: NodeOutcome): boolean {

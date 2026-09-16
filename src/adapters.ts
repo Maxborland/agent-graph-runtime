@@ -8,8 +8,12 @@ import type {
   AdapterRequest,
   AdapterResult,
   AgentHandoff,
+  ConfiguredExecution,
   ModelUsageEvidence,
+  ObservedExecution,
 } from "./types.js";
+import { CodexSessionExecutionChangedError, readCodexSessionExecution } from "./codex-session.js";
+import { reasoningEfforts } from "./types.js";
 
 const outputSchema = {
   type: "object",
@@ -42,7 +46,20 @@ export interface AgentAdapter {
 }
 
 export class NonRetryableAdapterError extends Error {
-  override readonly name = "NonRetryableAdapterError";
+  override readonly name: string = "NonRetryableAdapterError";
+}
+
+/** Raised when Codex reports an effective model or effort that differs from the graph request. */
+export class ExecutionEvidenceMismatchError extends NonRetryableAdapterError {
+  override readonly name = "ExecutionEvidenceMismatchError";
+
+  constructor(
+    message: string,
+    readonly configuredExecution: ConfiguredExecution,
+    readonly observedExecution: ObservedExecution,
+  ) {
+    super(message);
+  }
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -52,6 +69,12 @@ export class CodexAdapter implements AgentAdapter {
   ) {}
 
   async execute(request: AdapterRequest): Promise<AdapterResult> {
+    if (
+      request.node.reasoningEffort !== undefined &&
+      !(reasoningEfforts as readonly string[]).includes(request.node.reasoningEffort)
+    ) {
+      throw new Error(`Codex reasoningEffort must be one of ${reasoningEfforts.join(", ")}`);
+    }
     await mkdir(request.artifactsDirectory, { recursive: true });
     const schemaPath = join(request.artifactsDirectory, `${request.node.id}.schema.json`);
     const outputPath = join(request.artifactsDirectory, `${request.node.id}.codex.json`);
@@ -60,6 +83,9 @@ export class CodexAdapter implements AgentAdapter {
     const args = [
       ...this.prefixArguments,
       "exec",
+      ...(request.node.reasoningEffort === undefined
+        ? []
+        : ["-c", `model_reasoning_effort="${request.node.reasoningEffort}"`]),
       "--json",
       "--output-schema",
       schemaPath,
@@ -78,6 +104,14 @@ export class CodexAdapter implements AgentAdapter {
     ];
     if (request.node.model) args.push("--model", request.node.model);
     args.push("-");
+    const configuredExecution: ConfiguredExecution = {
+      ...(request.node.model === undefined ? {} : { model: request.node.model }),
+      ...(request.node.reasoningEffort === undefined ? {} : { reasoningEffort: request.node.reasoningEffort }),
+    };
+    const hasConfiguredExecution = Object.keys(configuredExecution).length > 0;
+    let observedExecution: ObservedExecution | undefined;
+    let executionMismatch: ExecutionEvidenceMismatchError | undefined;
+    const executionStartedAt = Date.now();
     const processResult = await runProcess(
       this.command,
       args,
@@ -85,19 +119,74 @@ export class CodexAdapter implements AgentAdapter {
       request.repositoryRoot,
       request.timeoutMs,
       request.signal,
-      (line) => emitActivity(request.onActivity, summarizeCodexActivity(line)),
+      (line) => {
+        const observation = observeCodexExecution(line, request.node, observedExecution);
+        observedExecution = observation.observedExecution;
+        executionMismatch ??= observation.mismatch;
+        emitActivity(request.onActivity, summarizeCodexActivity(line));
+      },
       request.environment,
     );
+    const executionFinishedAt = Date.now();
     await Promise.all([
       writeFile(join(request.artifactsDirectory, `${request.node.id}.codex.stdout.jsonl`), processResult.stdout, "utf8"),
       writeFile(join(request.artifactsDirectory, `${request.node.id}.codex.stderr.txt`), processResult.stderr, "utf8"),
     ]);
+    await writeCodexExecutionEvidence(
+      request.artifactsDirectory,
+      request.node.id,
+      hasConfiguredExecution ? configuredExecution : undefined,
+      observedExecution,
+    );
     if (processResult.terminationError) throw processResult.terminationError;
-    if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
-      throw processFailure("Codex", processResult);
+    if (executionMismatch) throw executionMismatch;
+    if (processResult.aborted) throw processFailure("Codex", processResult);
+    if (
+      observedExecution?.threadId &&
+      (observedExecution.model === undefined || observedExecution.reasoningEffort === undefined)
+    ) {
+      let sessionExecution: ObservedExecution | undefined;
+      let conflictingObservations: ObservedExecution[] | undefined;
+      try {
+        sessionExecution = await readCodexSessionExecution(
+          observedExecution.threadId,
+          request.repositoryRoot,
+          executionStartedAt,
+          executionFinishedAt,
+          request.environment,
+        );
+      } catch (error) {
+        if (error instanceof CodexSessionExecutionChangedError) {
+          sessionExecution = error.observedExecution;
+          conflictingObservations = [error.previousExecution, error.observedExecution];
+          executionMismatch = new ExecutionEvidenceMismatchError(
+            error.message + ": " + JSON.stringify(conflictingObservations),
+            configuredExecution, error.observedExecution,
+          );
+        }
+      }
+      if (sessionExecution?.threadId === observedExecution.threadId) {
+        executionMismatch ??= executionEvidenceMismatch(request.node, sessionExecution);
+        observedExecution = mergeObservedExecution(observedExecution, sessionExecution);
+        executionMismatch ??= executionEvidenceMismatch(request.node, observedExecution);
+        await writeCodexExecutionEvidence(
+          request.artifactsDirectory,
+          request.node.id,
+          hasConfiguredExecution ? configuredExecution : undefined,
+          observedExecution,
+          conflictingObservations,
+        );
+      }
     }
+    if (executionMismatch) throw executionMismatch;
+    if (processResult.timedOut || processResult.exitCode !== 0) throw processFailure("Codex", processResult);
     const raw = await readFile(outputPath, "utf8");
-    return { ...processResult, handoff: parseHandoff(raw) };
+    return {
+      ...processResult,
+      handoff: parseHandoff(raw),
+      ...(hasConfiguredExecution ? { configuredExecution } : {}),
+      ...(observedExecution === undefined ? {} : { observedExecution }),
+    };
   }
 }
 
@@ -600,6 +689,138 @@ function parseActivityRecord(line: string): Record<string, unknown> | undefined 
   } catch {
     return undefined;
   }
+}
+
+interface CodexExecutionObservation {
+  observedExecution?: ObservedExecution;
+  mismatch?: ExecutionEvidenceMismatchError;
+}
+
+/**
+ * Read effective execution metadata from the live Codex JSONL stream.
+ *
+ * `thread.started` is deliberately captured while the process is still
+ * streaming. The retained stdout is bounded and may start after that record,
+ * so parsing the artifact tail cannot establish session identity reliably.
+ */
+function observeCodexExecution(
+  line: string,
+  node: AdapterRequest["node"],
+  previous: ObservedExecution | undefined,
+): CodexExecutionObservation {
+  const value = parseActivityRecord(line);
+  if (!value) return { ...(previous === undefined ? {} : { observedExecution: previous }) };
+  const explicitThreadId = firstNonEmptyString(
+    value.thread_id,
+    value.threadId,
+    isRecord(value.payload) ? value.payload.thread_id : undefined,
+    isRecord(value.payload) ? value.payload.threadId : undefined,
+  );
+  if (value.type === "thread.started") {
+    if (!explicitThreadId) return { ...(previous === undefined ? {} : { observedExecution: previous }) };
+    return { observedExecution: { threadId: explicitThreadId } };
+  }
+  if (value.type !== "turn_context") {
+    return { ...(previous === undefined ? {} : { observedExecution: previous }) };
+  }
+  const context = isRecord(value.payload) ? value.payload : value;
+  const threadId = explicitThreadId ?? previous?.threadId;
+  // A context without the exact session identity is not admissible evidence.
+  if (!threadId || (explicitThreadId !== undefined && previous?.threadId !== undefined && explicitThreadId !== previous.threadId)) {
+    return { ...(previous === undefined ? {} : { observedExecution: previous }) };
+  }
+  const model = firstNonEmptyString(context.model, context.model_slug, context.modelSlug, context.canonicalModel);
+  const reasoningEffort = firstNonEmptyString(
+    context.effort,
+    context.reasoning_effort,
+    context.reasoningEffort,
+    context.model_reasoning_effort,
+  );
+  if (model === undefined && reasoningEffort === undefined) {
+    return { ...(previous === undefined ? {} : { observedExecution: previous }) };
+  }
+  const observedExecution: ObservedExecution = {
+    threadId,
+    ...(model === undefined ? (previous?.model === undefined ? {} : { model: previous.model }) : { model }),
+    ...(reasoningEffort === undefined
+      ? (previous?.reasoningEffort === undefined ? {} : { reasoningEffort: previous.reasoningEffort })
+      : { reasoningEffort }),
+  };
+  const mismatch = executionEvidenceMismatch(node, observedExecution);
+  return {
+    observedExecution,
+    ...(mismatch === undefined ? {} : { mismatch }),
+  };
+}
+
+function mergeObservedExecution(
+  live: ObservedExecution,
+  session: ObservedExecution,
+): ObservedExecution {
+  return {
+    ...(live.threadId === undefined ? {} : { threadId: live.threadId }),
+    ...(live.model ?? session.model
+      ? { model: live.model ?? session.model }
+      : {}),
+    ...(live.reasoningEffort ?? session.reasoningEffort
+      ? { reasoningEffort: live.reasoningEffort ?? session.reasoningEffort }
+      : {}),
+  };
+}
+
+async function writeCodexExecutionEvidence(
+  artifactsDirectory: string,
+  nodeId: string,
+  configuredExecution: ConfiguredExecution | undefined,
+  observedExecution: ObservedExecution | undefined,
+  conflictingObservations?: ObservedExecution[],
+): Promise<void> {
+  if (configuredExecution === undefined && observedExecution === undefined) return;
+  await writeFile(
+    join(artifactsDirectory, `${nodeId}.execution.json`),
+    `${JSON.stringify({
+      configuredExecution: configuredExecution ?? null,
+      observedExecution: observedExecution ?? null,
+      ...(conflictingObservations ? { conflictingObservations } : {}),
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function executionEvidenceMismatch(
+  node: AdapterRequest["node"],
+  observedExecution: ObservedExecution,
+): ExecutionEvidenceMismatchError | undefined {
+  const mismatches: string[] = [];
+  if (node.model !== undefined && observedExecution.model !== undefined && observedExecution.model !== node.model) {
+    mismatches.push(`model ${observedExecution.model} does not match configured ${node.model}`);
+  }
+  if (
+    node.reasoningEffort !== undefined &&
+    observedExecution.reasoningEffort !== undefined &&
+    observedExecution.reasoningEffort !== node.reasoningEffort
+  ) {
+    mismatches.push(`reasoning effort ${observedExecution.reasoningEffort} does not match configured ${node.reasoningEffort}`);
+  }
+  if (mismatches.length === 0) return undefined;
+  const configuredExecution: ConfiguredExecution = {
+    ...(node.model === undefined ? {} : { model: node.model }),
+    ...(node.reasoningEffort === undefined ? {} : { reasoningEffort: node.reasoningEffort }),
+  };
+  return new ExecutionEvidenceMismatchError(
+    `Codex effective execution mismatch: ${mismatches.join("; ")}`,
+    configuredExecution,
+    observedExecution,
+  );
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
 }
 
 function allowedValue(value: unknown, allowed: readonly string[]): string | undefined {

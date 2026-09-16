@@ -40,8 +40,8 @@ test("retry invalidates the selected node and every accepted descendant", async 
     const state = await new OperatorControl(graph, root).retry("a");
     assert.equal(state.nodes.a!.status, "pending");
     assert.equal(state.nodes.b!.status, "pending");
-    assert.deepEqual(state.nodes.a!.evidenceFiles, []);
-    assert.deepEqual(state.nodes.b!.evidenceFiles, []);
+    assert.deepEqual(state.nodes.a!.evidenceFiles, ["evidence/a.json"]);
+    assert.deepEqual(state.nodes.b!.evidenceFiles, ["evidence/b.json"]);
     assert.equal(state.nodes.a!.retryBlocked, undefined);
     assert.equal(state.nodes.b!.retryBlocked, undefined);
     assert.deepEqual(selectReadyNodes(graph, state).map((node) => node.id), ["a"]);

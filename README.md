@@ -130,6 +130,9 @@ accepted evidence into each downstream agent prompt, including after resume.
 These are bounded excerpts with full evidence paths, not shared conversation
 memory or new permissions. Raw process and check output is not injected.
 
+See [explicit Codex effort, durable retries, and independent review evidence](docs/commerce-runtime.md)
+for the Commerce integration settings and compatibility boundaries.
+
 ## Runtime contract
 
 - `codex` nodes use `codex exec`, JSON schema output, and Codex sandboxing.
