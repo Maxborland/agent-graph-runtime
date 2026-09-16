@@ -271,3 +271,31 @@ test("runner preserves mismatch metadata and does not automatically retry a wron
     assert.equal(evidence.retryBlocked, true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("session mismatch blocks retry even when the final handoff file is missing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-session-missing-handoff-"));
+  const fake = await writeCodexFixture(root, `
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const id = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb";
+const timestamp = new Date().toISOString();
+const directory = join(process.env.CODEX_HOME, "sessions", ...timestamp.slice(0, 10).split("-"));
+mkdirSync(directory, { recursive: true });
+writeFileSync(join(directory, "rollout-test-" + id + ".jsonl"), [
+  { type: "session_meta", timestamp, payload: { id, cwd: process.cwd(), timestamp } },
+  { type: "turn_context", timestamp, payload: { cwd: process.cwd(), model: "gpt-5.6-luna", effort: "high" } }
+].map(value => JSON.stringify(value)).join("\\n") + "\\n");
+console.log(JSON.stringify({ type: "thread.started", thread_id: id }));
+`);
+  try {
+    await assert.rejects(new CodexAdapter(process.execPath, [fake]).execute({
+      ...request(root, fake), environment: { CODEX_HOME: join(root, "codex-home") },
+    }), (error: unknown) => {
+      assert.ok(error instanceof ExecutionEvidenceMismatchError);
+      assert.equal(error.observedExecution.reasoningEffort, "high");
+      return true;
+    });
+    const evidence = JSON.parse(await readFile(join(root, "artifacts/reasoning.execution.json"), "utf8"));
+    assert.equal(evidence.observedExecution.reasoningEffort, "high");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

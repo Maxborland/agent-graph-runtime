@@ -173,8 +173,8 @@ export class CodexAdapter implements AgentAdapter {
         );
       }
     }
-    const raw = await readFile(outputPath, "utf8");
     if (executionMismatch) throw executionMismatch;
+    const raw = await readFile(outputPath, "utf8");
     return {
       ...processResult,
       handoff: parseHandoff(raw),

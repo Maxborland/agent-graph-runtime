@@ -362,7 +362,9 @@ test(
       else process.env.NODE_ENV = previousNodeEnv;
       if (previousTaskkill === undefined) delete process.env.AGR_TEST_TASKKILL_PATH;
       else process.env.AGR_TEST_TASKKILL_PATH = previousTaskkill;
-      await rm(root, { recursive: true, force: true });
+      // Unconfirmed termination returns before Windows releases the child cwd.
+      // Bound cleanup retries; a persistent process or lock must still fail.
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   },
 );
