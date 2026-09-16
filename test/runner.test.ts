@@ -1073,7 +1073,8 @@ test("explicit retry clears semantic attention and allows a later complete hando
     const reset = await new OperatorControl(graph, root).retry("agent");
     assert.equal(reset.status, "running");
     assert.equal(reset.nodes.agent!.retryBlocked, undefined);
-    assert.equal(reset.nodes.agent!.attempts, 0);
+    assert.equal(reset.nodes.agent!.attempts, 1);
+    assert.equal(reset.nodes.agent!.generationAttempts, 0);
     assert.equal((await new GraphRunner(graph, root, { claudex: adapter }).run()).status, "completed");
     assert.equal(calls, 2);
   } finally {

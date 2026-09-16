@@ -11,6 +11,18 @@ export function createInitialState(
   baselineChangedFiles: string[],
 ): RunState {
   const now = new Date().toISOString();
+  const nodes = Object.fromEntries(
+    graph.nodes.map((node) => [
+      node.id,
+      {
+        status: "pending" as const,
+        attempts: 0,
+        generationAttempts: 0,
+        attemptHighWater: 0,
+        evidenceFiles: [],
+      },
+    ]),
+  );
   return {
     runId: graph.run.id,
     graphHash: graphHash(graph),
@@ -18,12 +30,7 @@ export function createInitialState(
     createdAt: now,
     updatedAt: now,
     baselineChangedFiles: [...baselineChangedFiles],
-    nodes: Object.fromEntries(
-      graph.nodes.map((node) => [
-        node.id,
-        { status: "pending", attempts: 0, evidenceFiles: [] },
-      ]),
-    ),
+    nodes,
   };
 }
 

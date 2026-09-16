@@ -61,9 +61,10 @@ test("lifecycle retry invalidates the selected node and every descendant", () =>
   assert.deepEqual(events.map((event) => event.nodeId).sort(), ["a", "b"]);
   for (const id of ["a", "b"]) {
     assert.equal(state.nodes[id]!.status, "pending");
-    assert.equal(state.nodes[id]!.attempts, 0);
+    assert.equal(state.nodes[id]!.attempts, 1);
+    assert.equal(state.nodes[id]!.generationAttempts, 0);
     assert.equal(state.nodes[id]!.retryBlocked, undefined);
-    assert.deepEqual(state.nodes[id]!.evidenceFiles, []);
+    assert.deepEqual(state.nodes[id]!.evidenceFiles, [`evidence/${id}.json`]);
   }
   assert.equal(state.nodes.other!.status, "accepted");
   assert.equal(state.status, "running");

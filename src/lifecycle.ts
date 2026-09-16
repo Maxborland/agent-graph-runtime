@@ -1,4 +1,4 @@
-import type { GraphDefinition, GraphNodeDefinition, RunEvent, RunState } from "./types.js";
+import type { GraphDefinition, GraphNodeDefinition, NodeRunState, RunEvent, RunState } from "./types.js";
 
 export type LifecycleEvent = Omit<RunEvent, "seq" | "at">;
 
@@ -34,10 +34,12 @@ export class RunLifecycle {
     invalidated.add(nodeId);
     const events: LifecycleEvent[] = [];
     for (const id of invalidated) {
-      const nodeState = this.state.nodes[id]!;
+      const nodeState = ensureHistoryNode(this.state.nodes[id]!);
       nodeState.status = "pending";
-      nodeState.attempts = 0;
-      nodeState.evidenceFiles = [];
+      // The manual retry starts a new generation. Lifetime attempt numbers
+      // and all evidence paths stay visible so old attempts remain auditable.
+      nodeState.generationAttempts = 0;
+      delete nodeState.acceptedAttempt;
       delete nodeState.retryBlocked;
       delete nodeState.approvedTarget;
       delete nodeState.lastError;
@@ -59,6 +61,10 @@ export class RunLifecycle {
   }
 
   readyNodes(): GraphNodeDefinition[] {
+    for (const node of this.graph.nodes) {
+      const nodeState = this.state.nodes[node.id];
+      if (nodeState) ensureHistoryNode(nodeState);
+    }
     const running = Object.values(this.state.nodes).filter((node) => node.status === "running").length;
     const capacity = Math.max(0, this.graph.run.maxConcurrency - running);
     return this.graph.nodes
@@ -67,7 +73,7 @@ export class RunLifecycle {
         if (!nodeState) return false;
         if (!["pending", "failed"].includes(nodeState.status)) return false;
         if (nodeState.retryBlocked) return false;
-        if (nodeState.attempts >= node.maxAttempts) return false;
+        if ((ensureHistoryNode(nodeState).generationAttempts ?? nodeState.attempts) >= node.maxAttempts) return false;
         return node.needs.every((dependency) => this.state.nodes[dependency]?.status === "accepted");
       })
       .slice(0, capacity);
@@ -129,9 +135,16 @@ export class RunLifecycle {
   startNode(nodeId: string): LifecycleEvent & { type: "node_started"; nodeId: string; detail: string } {
     const node = this.readyNodes().find((candidate) => candidate.id === nodeId);
     if (!node) throw new Error(`node "${nodeId}" is not ready to start`);
-    const nodeState = this.state.nodes[nodeId]!;
+    const nodeState = ensureHistoryNode(this.state.nodes[nodeId]!);
     nodeState.status = "running";
-    nodeState.attempts += 1;
+    // `attemptHighWater` protects a legacy run whose numeric state counter was
+    // reset while old evidence, prompts, or output directories still exist.
+    const highWater = Math.max(nodeState.attempts, nodeState.attemptHighWater ?? 0);
+    if (highWater >= Number.MAX_SAFE_INTEGER) throw new Error(`attempt ordinal overflow for node "${nodeId}"`);
+    nodeState.attempts = highWater + 1;
+    nodeState.attemptHighWater = nodeState.attempts;
+    nodeState.generationAttempts = (nodeState.generationAttempts ?? 0) + 1;
+    delete nodeState.acceptedAttempt;
     delete nodeState.lastError;
     return { type: "node_started", nodeId, detail: `attempt ${nodeState.attempts}` };
   }
@@ -140,7 +153,9 @@ export class RunLifecycle {
     const nodeState = this.state.nodes[nodeId];
     if (!nodeState) throw new Error(`node "${nodeId}" does not exist`);
     if (nodeState.status !== "running") throw new Error(`node "${nodeId}" is not running`);
+    ensureHistoryNode(nodeState);
     nodeState.status = "accepted";
+    nodeState.acceptedAttempt = nodeState.attempts;
     delete nodeState.retryBlocked;
     delete nodeState.lastError;
     return { type: "node_accepted", nodeId };
@@ -244,6 +259,19 @@ export class RunLifecycle {
     this.state.status = "failed";
     return { type: "run_failed" };
   }
+}
+
+function ensureHistoryNode(node: NodeRunState): NodeRunState {
+  if (node.generationAttempts === undefined) node.generationAttempts = node.attempts;
+  if (node.attemptHighWater === undefined) node.attemptHighWater = node.attempts;
+  if (!isNonNegativeInteger(node.generationAttempts) || !isNonNegativeInteger(node.attemptHighWater)) {
+    throw new Error("invalid node attempt history");
+  }
+  return node;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function collectDescendants(graph: GraphDefinition, nodeId: string): Set<string> {

@@ -1,7 +1,11 @@
 import { writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-import { NonRetryableAdapterError, type AgentAdapter } from "./adapters.js";
+import {
+  ExecutionEvidenceMismatchError,
+  NonRetryableAdapterError,
+  type AgentAdapter,
+} from "./adapters.js";
 import { findUnexpectedChanges, gitChangeSnapshot, type GitChangeSnapshot } from "./repository.js";
 import { RunObserver } from "./observation.js";
 import { RunStore } from "./store.js";
@@ -75,6 +79,7 @@ export class PassiveAdvisor {
       checks: [],
       maxAttempts: 1,
       ...(definition.model === undefined ? {} : { model: definition.model }),
+      ...(definition.reasoningEffort === undefined ? {} : { reasoningEffort: definition.reasoningEffort }),
     };
     let recentEvents: RunEvent[];
     try {
@@ -113,7 +118,16 @@ export class PassiveAdvisor {
       });
     } catch (error) {
       await Promise.allSettled([...pendingActivity]);
-      await this.recordFailure(store, advisorId, wave, messageOf(error), error instanceof NonRetryableAdapterError);
+      await this.recordFailure(
+        store,
+        advisorId,
+        wave,
+        messageOf(error),
+        error instanceof NonRetryableAdapterError || error instanceof ExecutionEvidenceMismatchError,
+        error instanceof ExecutionEvidenceMismatchError
+          ? { configuredExecution: error.configuredExecution, observedExecution: error.observedExecution }
+          : undefined,
+      );
       return;
     }
     await Promise.allSettled([...pendingActivity]);
@@ -141,6 +155,8 @@ export class PassiveAdvisor {
       advisorId,
       wave,
       executor: definition.executor,
+      configuredExecution: result.configuredExecution ?? null,
+      observedExecution: result.observedExecution ?? null,
       severity,
       handoff: result.handoff,
       modelUsage: result.modelUsage ?? null,
@@ -182,9 +198,24 @@ export class PassiveAdvisor {
     wave: number,
     detail: string,
     blocker: boolean,
+    execution?: {
+      configuredExecution: AdapterResult["configuredExecution"];
+      observedExecution: AdapterResult["observedExecution"];
+    },
   ): Promise<void> {
     const evidencePath = join(store.evidenceDirectory, `advisor-wave-${wave}.json`);
-    await writeFile(evidencePath, `${JSON.stringify({ advisorId, wave, failures: [detail], blocker }, null, 2)}\n`, "utf8");
+    await writeFile(evidencePath, `${JSON.stringify({
+      advisorId,
+      wave,
+      ...(execution === undefined
+        ? {}
+        : {
+            configuredExecution: execution.configuredExecution ?? null,
+            observedExecution: execution.observedExecution ?? null,
+          }),
+      failures: [detail],
+      blocker,
+    }, null, 2)}\n`, "utf8");
     const at = new Date().toISOString();
     const safeSummary = blocker
       ? "advisor process safety could not be confirmed; inspect evidence"

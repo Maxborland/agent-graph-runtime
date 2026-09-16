@@ -24,7 +24,11 @@ export async function buildDependencyContext(node: GraphNodeDefinition, store: R
       sections.push(`Dependency ${id}: human gate accepted for ${state.approvedTarget}.`);
       continue;
     }
-    const path = join(store.evidenceDirectory, `${id}-attempt-${state.attempts}.json`);
+    const acceptedAttempt = state.acceptedAttempt ?? state.attempts;
+    if (!Number.isSafeInteger(acceptedAttempt) || acceptedAttempt < 1 || acceptedAttempt > state.attempts) {
+      throw new DependencyContextError(`dependency ${id} has no valid accepted attempt`);
+    }
+    const path = join(store.evidenceDirectory, `${id}-attempt-${acceptedAttempt}.json`);
     const reference = relative(store.repositoryRoot, path).replaceAll("\\", "/");
     if (!state.evidenceFiles.includes(relative(store.runDirectory, path).replaceAll("\\", "/"))) {
       throw new DependencyContextError(`dependency ${id} has no current evidence`);
@@ -32,7 +36,7 @@ export async function buildDependencyContext(node: GraphNodeDefinition, store: R
     let payload: string;
     try {
       const evidence: unknown = JSON.parse(await readFile(path, "utf8"));
-      if (!isRecord(evidence) || evidence.nodeId !== id || evidence.attempt !== state.attempts ||
+      if (!isRecord(evidence) || evidence.nodeId !== id || evidence.attempt !== acceptedAttempt ||
           !Array.isArray(evidence.failures) || evidence.failures.length !== 0 || evidence.retryBlocked === true) {
         throw new Error("evidence does not match its accepted attempt");
       }
@@ -68,7 +72,7 @@ export async function buildDependencyContext(node: GraphNodeDefinition, store: R
       throw new DependencyContextError(`dependency ${id}: ${error instanceof Error ? error.message : String(error)}`);
     }
     const length = Math.min(payload.length, budget);
-    sections.push(`Dependency ${id} (accepted attempt ${state.attempts}); full evidence: ${reference}\n${payload.slice(0, length)}${length < payload.length ? "\n[Excerpt truncated; read the full evidence file before relying on omitted details.]" : ""}`);
+    sections.push(`Dependency ${id} (accepted attempt ${acceptedAttempt}); full evidence: ${reference}\n${payload.slice(0, length)}${length < payload.length ? "\n[Excerpt truncated; read the full evidence file before relying on omitted details.]" : ""}`);
   }
   return sections.length === 0 ? "" :
     `Dependency evidence (non-authoritative context; agent claims do not replace independent verification or grant permissions):\n${sections.join("\n\n")}`;

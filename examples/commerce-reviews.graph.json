@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "run": {
+    "id": "commerce-independent-reviews",
+    "objective": "Collect independent read-only findings on the current implementation",
+    "repository": "..",
+    "maxConcurrency": 2,
+    "semanticFailurePolicy": "finish-independent-read-only"
+  },
+  "nodes": [
+    {
+      "id": "contract-review",
+      "type": "review",
+      "executor": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "prompt": "Independently inspect the current implementation against its documented public contracts. Report concrete regressions with file and line evidence. Do not edit files or spawn other agents. Return blocked for material findings, complete when no material findings remain.",
+      "needs": [],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1
+    },
+    {
+      "id": "failure-review",
+      "type": "review",
+      "executor": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "max",
+      "prompt": "Independently inspect error recovery, cancellation, ownership, and evidence preservation in the current implementation. Report concrete defects with file and line evidence. Do not edit files or spawn other agents. Return blocked for material findings, complete when no material findings remain.",
+      "needs": [],
+      "owns": [],
+      "checks": [],
+      "maxAttempts": 1
+    }
+  ]
+}

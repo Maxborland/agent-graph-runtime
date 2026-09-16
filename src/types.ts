@@ -1,5 +1,8 @@
 export const executorNames = ["codex", "claude", "claudex", "shell"] as const;
 export type ExecutorName = (typeof executorNames)[number];
+/** Effort values accepted by the Codex CLI configuration key. */
+export const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffort = (typeof reasoningEfforts)[number];
 export type NodeType =
   | "agent"
   | "verify"
@@ -14,12 +17,14 @@ export interface GraphRunDefinition {
   maxConcurrency: number;
   allowExternalActions?: boolean;
   codeGraph?: boolean;
+  semanticFailurePolicy?: "stop" | "finish-independent-read-only";
   advisor?: AdvisorDefinition;
 }
 
 export interface AdvisorDefinition {
   executor: Exclude<ExecutorName, "shell">;
   model?: string;
+  reasoningEffort?: ReasoningEffort;
   instructions?: string;
   stopOnBlocker?: boolean;
 }
@@ -37,6 +42,7 @@ export interface GraphNodeDefinition {
   maxAttempts: number;
   timeoutMs?: number;
   model?: string;
+  reasoningEffort?: ReasoningEffort;
   requiredModelUsage?: RequiredModelUsage[];
   context?: {
     symbols?: string[];
@@ -72,7 +78,13 @@ export type NodeStatus =
 
 export interface NodeRunState {
   status: NodeStatus;
+  /** Lifetime ordinal of the current or most recently started attempt. */
   attempts: number;
+  /** Automatic attempt budget consumed since the last explicit retry. */
+  generationAttempts?: number;
+  /** Highest persisted/reserved ordinal, including legacy orphan artifacts. */
+  attemptHighWater?: number;
+  acceptedAttempt?: number;
   retryBlocked?: boolean;
   approvedTarget?: string;
   lastError?: string;
@@ -166,7 +178,21 @@ export interface AdapterResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  configuredExecution?: ConfiguredExecution;
+  observedExecution?: ObservedExecution;
   modelUsage?: Record<string, ModelUsageEvidence>;
+}
+
+export interface ConfiguredExecution {
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+}
+
+export interface ObservedExecution {
+  threadId?: string;
+  model?: string;
+  /** Provider-reported text is retained verbatim so unknown values cannot be mistaken for a supported effort. */
+  reasoningEffort?: string;
 }
 
 export interface ModelUsageEvidence {

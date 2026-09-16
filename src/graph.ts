@@ -3,7 +3,7 @@ import type {
   GraphNodeDefinition,
   GraphValidationResult,
 } from "./types.js";
-import { executorNames } from "./types.js";
+import { executorNames, reasoningEfforts } from "./types.js";
 
 const nodeTypes = new Set([
   "agent",
@@ -15,12 +15,15 @@ const nodeTypes = new Set([
 const executors = new Set<string>(executorNames);
 const agentDispatchNodeTypes = new Set(["agent", "review", "external_action"]);
 const graphProperties = new Set(["version", "run", "nodes"]);
-const runProperties = new Set(["id", "objective", "repository", "maxConcurrency", "allowExternalActions", "codeGraph", "advisor"]);
-const advisorProperties = new Set(["executor", "model", "instructions", "stopOnBlocker"]);
+const runProperties = new Set([
+  "id", "objective", "repository", "maxConcurrency", "allowExternalActions", "codeGraph",
+  "semanticFailurePolicy", "advisor",
+]);
+const advisorProperties = new Set(["executor", "model", "reasoningEffort", "instructions", "stopOnBlocker"]);
 const nodeProperties = new Set([
   "id", "type", "executor", "prompt", "target", "needs", "owns",
   "implicitOutputs", "checks", "maxAttempts", "timeoutMs", "model",
-  "requiredModelUsage", "context",
+  "reasoningEffort", "requiredModelUsage", "context",
 ]);
 const modelUsageProperties = new Set(["model", "provider", "contextWindow"]);
 const contextProperties = new Set(["symbols", "impact", "affectedFiles"]);
@@ -51,6 +54,12 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
   if (graph.run.codeGraph !== undefined && typeof graph.run.codeGraph !== "boolean") {
     errors.push("run.codeGraph must be a boolean");
   }
+  if (
+    graph.run.semanticFailurePolicy !== undefined &&
+    !["stop", "finish-independent-read-only"].includes(graph.run.semanticFailurePolicy)
+  ) {
+    errors.push('run.semanticFailurePolicy must be "stop" or "finish-independent-read-only"');
+  }
   if (graph.run.advisor !== undefined) {
     if (!isRecord(graph.run.advisor)) {
       errors.push("run.advisor must be an object");
@@ -67,6 +76,12 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
         (typeof graph.run.advisor.model !== "string" || !graph.run.advisor.model.trim())
       ) {
         errors.push("run.advisor.model must be a non-empty string");
+      }
+      if (graph.run.advisor.reasoningEffort !== undefined && !isReasoningEffort(graph.run.advisor.reasoningEffort)) {
+        errors.push(`run.advisor.reasoningEffort must be one of ${reasoningEfforts.join(", ")}`);
+      }
+      if (graph.run.advisor.reasoningEffort !== undefined && graph.run.advisor.executor !== "codex") {
+        errors.push("run.advisor.reasoningEffort is supported only for the Codex executor");
       }
       if (graph.run.advisor.instructions !== undefined && typeof graph.run.advisor.instructions !== "string") {
         errors.push("run.advisor.instructions must be a string");
@@ -179,6 +194,15 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
     if (node.model !== undefined && typeof node.model !== "string") {
       errors.push(`node "${node.id}" model must be a string`);
     }
+    if (node.reasoningEffort !== undefined && !isReasoningEffort(node.reasoningEffort)) {
+      errors.push(`node "${node.id}" reasoningEffort must be one of ${reasoningEfforts.join(", ")}`);
+    }
+    if (node.reasoningEffort !== undefined && !agentDispatchNodeTypes.has(node.type)) {
+      errors.push(`node "${node.id}" reasoningEffort requires a dispatched Codex node`);
+    }
+    if (node.reasoningEffort !== undefined && node.executor !== "codex") {
+      errors.push(`node "${node.id}" reasoningEffort is supported only for the Codex executor`);
+    }
     if (node.context !== undefined) {
       if (!isRecord(node.context)) {
         errors.push(`node "${node.id}" context must be an object`);
@@ -230,6 +254,10 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
     errors.push(...findParallelOwnershipConflicts([...byId.values()], byId));
   }
   return { errors, topologicalOrder };
+}
+
+function isReasoningEffort(value: unknown): value is (typeof reasoningEfforts)[number] {
+  return typeof value === "string" && (reasoningEfforts as readonly string[]).includes(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
