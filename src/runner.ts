@@ -299,6 +299,11 @@ export class GraphRunner {
       // Exclusive reservation prevents raw output reuse even if an artifact
       // appears after the legacy high-water scan.
       await mkdir(artifactsDirectory);
+      if (node.type !== "verify" && node.executor !== "shell") {
+        const dependencyContext = await buildDependencyContext(node, store);
+        if (dependencyContext) prompt += `\n${dependencyContext}\n`;
+      }
+      // Publish only the final prompt; even dependency enrichment cannot replace it.
       await writeFile(promptPath, prompt, { encoding: "utf8", flag: "wx" });
       if (node.type === "verify") {
         const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
@@ -314,11 +319,7 @@ export class GraphRunner {
       }
       const adapter = node.executor ? this.adapters[node.executor] : undefined;
       if (!adapter) throw new Error(`executor "${node.executor ?? "none"}" is unavailable`);
-      const dependencyContext = await buildDependencyContext(node, store);
-      if (dependencyContext) {
-        prompt += `\n${dependencyContext}\n`;
-        await writeFile(promptPath, prompt, "utf8");
-      }
+
       const progressChannel = await createNodeProgressChannel(
         this.graph.run.id,
         node.id,

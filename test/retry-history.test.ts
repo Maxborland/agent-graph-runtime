@@ -166,3 +166,33 @@ test("conflicting immutable evidence is refused without changing bytes", async (
   await assert.rejects(writeImmutableArtifact(path, "second"), /immutable run artifact/);
   assert.equal(await readFile(path, "utf8"), "first");
 }));
+
+test("dependency prompt is published once with its final content", async (t) => fixture(async (root) => {
+  const fsPromises = (await import("node:fs/promises")).default;
+  const { syncBuiltinESMExports } = await import("node:module");
+  const promptPath = join(root, ".agent-graph/runs/history/prompts/consumer-attempt-1.md");
+  const publications: string[] = [];
+  const originalWrite = fsPromises.writeFile;
+  t.mock.method(fsPromises, "writeFile", async (...args: Parameters<typeof originalWrite>) => {
+    if (String(args[0]) === promptPath) publications.push(String(args[1]));
+    return originalWrite(...args);
+  });
+  syncBuiltinESMExports();
+  let dispatchedPrompt = "";
+  const adapter: AgentAdapter = { async execute(request) {
+    if (request.node.id === "consumer") dispatchedPrompt = request.prompt;
+    return { exitCode: 0, stdout: "", stderr: "", handoff: {
+      status: "complete", summary: "accepted source context", changedFiles: [], verification: [], gaps: [],
+    } };
+  } };
+  try {
+    assert.equal((await new GraphRunner(graph(), root, { codex: adapter }).run()).status, "completed");
+    assert.equal(publications.length, 1, "a published prompt must never be replaced");
+    assert.match(publications[0]!, /Dependency source \(accepted attempt 1\)/);
+    assert.equal(publications[0], dispatchedPrompt);
+    assert.equal(await readFile(promptPath, "utf8"), dispatchedPrompt);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+}));
