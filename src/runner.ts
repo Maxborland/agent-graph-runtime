@@ -1,7 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-import { ExecutionEvidenceMismatchError, NonRetryableAdapterError, type AgentAdapter } from "./adapters.js";
+import {
+  AgentProcessFailureError,
+  NonRetryableAgentProcessFailureError,
+  ExecutionEvidenceMismatchError,
+  NonRetryableAdapterError,
+  type AgentProcessFailureDetails,
+  type AgentAdapter,
+} from "./adapters.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { buildCodeContext } from "./context.js";
 import { buildDependencyContext, DependencyContextError } from "./dependency-context.js";
@@ -69,6 +76,7 @@ interface NodeOutcome {
   node: GraphNodeDefinition;
   prompt: string;
   adapterResult?: AdapterResult;
+  agentProcess?: AdapterResult["agentProcess"];
   configuredExecution?: AdapterResult["configuredExecution"];
   observedExecution?: AdapterResult["observedExecution"];
   checks: CheckResult[];
@@ -365,6 +373,7 @@ export class GraphRunner {
       const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
       return { node, prompt, adapterResult, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
     } catch (error) {
+      const processFailure = getAgentProcessFailureDetails(error);
       return {
         node,
         prompt,
@@ -373,9 +382,19 @@ export class GraphRunner {
         ...(error instanceof ExecutionEvidenceMismatchError ? {
           configuredExecution: error.configuredExecution,
           observedExecution: error.observedExecution,
+          ...(error.agentProcess === undefined ? {} : { agentProcess: error.agentProcess }),
         } : {}),
-        aborted: error instanceof Error && error.name === "AbortError",
-        retryBlocked: externalActionStarted || error instanceof NonRetryableAdapterError || error instanceof DependencyContextError,
+        ...(processFailure === undefined ? {} : {
+          ...(processFailure.configuredExecution === undefined ? {} : { configuredExecution: processFailure.configuredExecution }),
+          ...(processFailure.observedExecution === undefined ? {} : { observedExecution: processFailure.observedExecution }),
+          agentProcess: processFailure.agentProcess,
+        }),
+        aborted: error instanceof Error && (
+          error.name === "AbortError" ||
+          processFailure?.agentProcess.aborted === true
+        ),
+        retryBlocked: externalActionStarted || error instanceof NonRetryableAdapterError || error instanceof DependencyContextError ||
+          (processFailure?.retryBlocked ?? false),
       };
     }
   }
@@ -426,8 +445,8 @@ export class GraphRunner {
           executor: outcome.node.executor ?? "runtime",
           handoff: outcome.adapterResult?.handoff ?? null,
           agentProcess: outcome.adapterResult
-            ? { exitCode: outcome.adapterResult.exitCode }
-            : null,
+            ? outcome.adapterResult.agentProcess ?? { exitCode: outcome.adapterResult.exitCode }
+            : outcome.agentProcess ?? null,
           modelUsage: outcome.adapterResult?.modelUsage ?? null,
           configuredExecution: outcome.adapterResult?.configuredExecution ?? outcome.configuredExecution ?? (outcome.node.executor === 'codex' ? { model: outcome.node.model, reasoningEffort: outcome.node.reasoningEffort } : null),
           observedExecution: outcome.adapterResult?.observedExecution ?? outcome.observedExecution ?? null,
@@ -509,7 +528,9 @@ export class GraphRunner {
             attempt: node.attempts,
             executor: outcome.node.executor ?? "runtime",
             handoff: outcome.adapterResult?.handoff ?? null,
-            agentProcess: outcome.adapterResult ? { exitCode: outcome.adapterResult.exitCode } : null,
+            agentProcess: outcome.adapterResult
+              ? outcome.adapterResult.agentProcess ?? { exitCode: outcome.adapterResult.exitCode }
+              : outcome.agentProcess ?? null,
             modelUsage: outcome.adapterResult?.modelUsage ?? null,
             configuredExecution: outcome.adapterResult?.configuredExecution ?? outcome.configuredExecution ?? (outcome.node.executor === 'codex' ? { model: outcome.node.model, reasoningEffort: outcome.node.reasoningEffort } : null),
             observedExecution: outcome.adapterResult?.observedExecution ?? outcome.observedExecution ?? null,
@@ -557,6 +578,13 @@ function claimedOwnershipEscapes(outcome: NodeOutcome): string[] {
 function outcomeRequiresAttention(outcome: NodeOutcome): boolean {
   const status = outcome.adapterResult?.handoff.status;
   return Boolean(outcome.retryBlocked || status === "partial" || status === "blocked");
+}
+
+function getAgentProcessFailureDetails(error: unknown): AgentProcessFailureDetails | undefined {
+  if (error instanceof AgentProcessFailureError || error instanceof NonRetryableAgentProcessFailureError) {
+    return error;
+  }
+  return undefined;
 }
 
 function requiredModelUsageFailures(

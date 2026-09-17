@@ -15,6 +15,7 @@ export interface NodeProgressReport {
 
 const REPORT_TIMEOUT_MS = 2_000;
 const MAX_REPORT_BYTES = 4_096;
+const MAX_ACTIVE_SOCKETS = 16;
 
 export interface NodeProgressMilestone {
   at: string;
@@ -34,13 +35,19 @@ export async function createNodeProgressChannel(
   onReport: (report: NodeProgressMilestone) => void | Promise<void>,
 ): Promise<NodeProgressChannel> {
   const token = randomBytes(24).toString("hex");
-  const endpoint = process.platform === "win32"
-    ? `\\\\.\\pipe\\agr-progress-${process.pid}-${randomUUID()}`
-    : join(tmpdir(), `agr-progress-${process.pid}-${randomUUID()}.sock`);
+  const unixEndpoint = join(tmpdir(), `agr-progress-${process.pid}-${randomUUID()}.sock`);
+  let endpoint = unixEndpoint;
   let lastAcceptedAt = 0;
   const sockets = new Set<import("node:net").Socket>();
   const server = createServer((socket) => {
+    if (sockets.size >= MAX_ACTIVE_SOCKETS) {
+      socket.destroy();
+      return;
+    }
     sockets.add(socket);
+    socket.on("error", () => {
+      // A reporter may disconnect while AGR is replying; progress is non-fatal.
+    });
     socket.setTimeout(REPORT_TIMEOUT_MS, () => socket.destroy());
     socket.once("close", () => sockets.delete(socket));
     let raw = "";
@@ -96,7 +103,19 @@ export async function createNodeProgressChannel(
 
   await new Promise<void>((resolveListening, rejectListening) => {
     server.once("error", rejectListening);
-    server.listen(endpoint, resolveListening);
+    if (process.platform === "win32") {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          rejectListening(new Error("node progress channel did not expose a loopback address"));
+          return;
+        }
+        endpoint = `tcp://127.0.0.1:${address.port}`;
+        resolveListening();
+      });
+      return;
+    }
+    server.listen(unixEndpoint, resolveListening);
   });
   return {
     environment: {
@@ -108,7 +127,7 @@ export async function createNodeProgressChannel(
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-      if (process.platform !== "win32") await rm(endpoint, { force: true });
+      if (process.platform !== "win32") await rm(unixEndpoint, { force: true });
     },
   };
 }
@@ -118,7 +137,7 @@ export async function sendNodeProgress(
   report: NodeProgressReport,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const socket = createConnection(endpoint);
+    const socket = connectToProgressEndpoint(endpoint);
     let response = "";
     let settled = false;
     const finish = (error?: Error): void => {
@@ -145,4 +164,35 @@ export async function sendNodeProgress(
     });
     socket.once("connect", () => socket.write(`${JSON.stringify(report)}\n`));
   });
+}
+
+function connectToProgressEndpoint(endpoint: string): import("node:net").Socket {
+  if (!endpoint.startsWith("tcp://")) {
+    if (process.platform === "win32") {
+      throw new Error("node progress channel endpoint is not loopback TCP");
+    }
+    return createConnection(endpoint);
+  }
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new Error("node progress channel endpoint is invalid");
+  }
+  const port = Number(url.port);
+  if (
+    url.protocol !== "tcp:" ||
+    url.hostname !== "127.0.0.1" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    url.pathname !== ""
+  ) {
+    throw new Error("node progress channel endpoint is not loopback TCP");
+  }
+  return createConnection({ host: url.hostname, port });
 }

@@ -355,9 +355,8 @@ test("CLI progress rejects calls outside an active graph node", async () => {
 });
 
 test("CLI progress delivers a bounded authenticated node milestone", async () => {
-  const endpoint = process.platform === "win32"
-    ? `\\\\.\\pipe\\agr-progress-test-${randomUUID()}`
-    : join(tmpdir(), `agr-progress-test-${randomUUID()}.sock`);
+  const unixEndpoint = join(tmpdir(), `agr-progress-test-${randomUUID()}.sock`);
+  let endpoint = unixEndpoint;
   let resolveReceived!: (value: Record<string, unknown>) => void;
   let rejectReceived!: (error: unknown) => void;
   const received = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -380,7 +379,19 @@ test("CLI progress delivers a bounded authenticated node milestone", async () =>
   });
   await new Promise<void>((resolveListening, rejectListening) => {
     server.once("error", rejectListening);
-    server.listen(endpoint, resolveListening);
+    if (process.platform === "win32") {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address === null || typeof address === "string") {
+          rejectListening(new Error("test progress server did not expose a loopback address"));
+          return;
+        }
+        endpoint = `tcp://127.0.0.1:${address.port}`;
+        resolveListening();
+      });
+      return;
+    }
+    server.listen(unixEndpoint, resolveListening);
   });
   const cli = resolve("dist/src/cli.js");
   try {
@@ -409,7 +420,7 @@ test("CLI progress delivers a bounded authenticated node milestone", async () =>
     });
   } finally {
     server.close();
-    if (process.platform !== "win32") await rm(endpoint, { force: true });
+    if (process.platform !== "win32") await rm(unixEndpoint, { force: true });
   }
 });
 

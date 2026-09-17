@@ -7,7 +7,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { ClaudeAdapter, ClaudexAdapter, CodexAdapter } from "../src/adapters.js";
+import {
+  ClaudeAdapter,
+  ClaudexAdapter,
+  CodexAdapter,
+  NonRetryableAgentProcessFailureError,
+} from "../src/adapters.js";
 import type { GraphNodeDefinition } from "../src/types.js";
 
 const exec = promisify(execFile);
@@ -352,7 +357,10 @@ test(
             artifactsDirectory: root,
             timeoutMs: 200,
           }),
-          /failed to terminate timed-out process tree/,
+          (error: unknown) =>
+            error instanceof NonRetryableAgentProcessFailureError &&
+            error.agentProcess.exitCode === null &&
+            /failed to terminate timed-out process tree/.test(error.message),
         );
         assert.match(await readFile(join(root, testCase.stdout), "utf8"), /STDOUT_SENTINEL/);
         assert.match(await readFile(join(root, testCase.stderr), "utf8"), /STDERR_SENTINEL/);
