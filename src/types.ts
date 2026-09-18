@@ -178,9 +178,18 @@ export interface AdapterResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  agentProcess?: AgentProcessEvidence;
   configuredExecution?: ConfiguredExecution;
   observedExecution?: ObservedExecution;
   modelUsage?: Record<string, ModelUsageEvidence>;
+}
+
+export interface AgentProcessEvidence {
+  exitCode: number | null;
+  timedOut: boolean;
+  aborted: boolean;
+  timeoutMs: number;
+  terminationError?: string;
 }
 
 export interface ConfiguredExecution {

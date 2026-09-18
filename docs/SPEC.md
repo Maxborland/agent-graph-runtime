@@ -90,6 +90,8 @@ prompts, reasoning, tool arguments, command text, and raw output remain private.
   `node_progress` events. The latest report for every active node appears in
   later heartbeats. Invalid, spoofed, or unavailable reports never alter node
   state or acceptance.
+  Windows uses a loopback TCP endpoint bound only to `127.0.0.1` so a real
+  workspace-sandbox child can connect; POSIX retains its local Unix socket.
 - **AC28 Verbose activity:** `agr run --verbose` emits safe provider tool names
   and more frequent heartbeats without exposing tool arguments, model text,
   prompts, reasoning, commands, or raw output. Normal and JSON modes retain
@@ -478,6 +480,13 @@ Traceable test plan:
   failure, raw process output is retained, and no automatic retry overlaps the
   survivor. A process that handles the termination signal and exits with code
   zero after the deadline still fails as timed out.
+- Agent failure evidence: when a provider process times out, exits nonzero, or
+  is cancelled, consolidated attempt evidence retains the observed process
+  state (`exitCode` when reported, otherwise unknown; timeout/cancel flags,
+  deadline, and termination error when present) plus execution metadata captured
+  from the provider. Missing observed model or effort stays unknown; configured
+  values never fill that field, and the node is never accepted from a failed
+  process.
 - Dirty repository at start: allowed, but its baseline changed-file set is
   recorded. Per-wave content-aware snapshots preserve those paths while still
   detecting a second write, deletion, staging change, or overwrite during a node.

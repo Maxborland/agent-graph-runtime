@@ -8,6 +8,7 @@ import type {
   AdapterRequest,
   AdapterResult,
   AgentHandoff,
+  AgentProcessEvidence,
   ConfiguredExecution,
   ModelUsageEvidence,
   ObservedExecution,
@@ -49,6 +50,52 @@ export class NonRetryableAdapterError extends Error {
   override readonly name: string = "NonRetryableAdapterError";
 }
 
+export interface AgentProcessFailureDetails {
+  readonly agentProcess: AgentProcessEvidence;
+  readonly configuredExecution: ConfiguredExecution | undefined;
+  readonly observedExecution: ObservedExecution | undefined;
+  readonly retryBlocked: boolean;
+}
+
+/** A provider process failed after AGR captured its terminal state. */
+export class AgentProcessFailureError extends Error implements AgentProcessFailureDetails {
+  override readonly name = "AgentProcessFailureError";
+  readonly configuredExecution: ConfiguredExecution | undefined;
+  readonly observedExecution: ObservedExecution | undefined;
+
+  constructor(
+    message: string,
+    readonly agentProcess: AgentProcessEvidence,
+    configuredExecution?: ConfiguredExecution,
+    observedExecution?: ObservedExecution,
+    readonly retryBlocked = false,
+  ) {
+    super(message);
+    this.configuredExecution = configuredExecution;
+    this.observedExecution = observedExecution;
+  }
+}
+
+/** A provider process failed and its tree termination was not confirmed. */
+export class NonRetryableAgentProcessFailureError extends NonRetryableAdapterError implements AgentProcessFailureDetails {
+  override readonly name = "NonRetryableAgentProcessFailureError";
+  readonly configuredExecution: ConfiguredExecution | undefined;
+  readonly observedExecution: ObservedExecution | undefined;
+
+  constructor(
+    message: string,
+    readonly agentProcess: AgentProcessEvidence,
+    configuredExecution?: ConfiguredExecution,
+    observedExecution?: ObservedExecution,
+  ) {
+    super(message);
+    this.configuredExecution = configuredExecution;
+    this.observedExecution = observedExecution;
+  }
+
+  readonly retryBlocked = true;
+}
+
 /** Raised when Codex reports an effective model or effort that differs from the graph request. */
 export class ExecutionEvidenceMismatchError extends NonRetryableAdapterError {
   override readonly name = "ExecutionEvidenceMismatchError";
@@ -57,9 +104,13 @@ export class ExecutionEvidenceMismatchError extends NonRetryableAdapterError {
     message: string,
     readonly configuredExecution: ConfiguredExecution,
     readonly observedExecution: ObservedExecution,
+    agentProcess?: AgentProcessEvidence,
   ) {
     super(message);
+    this.agentProcess = agentProcess;
   }
+
+  agentProcess: AgentProcessEvidence | undefined;
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -138,9 +189,18 @@ export class CodexAdapter implements AgentAdapter {
       hasConfiguredExecution ? configuredExecution : undefined,
       observedExecution,
     );
-    if (processResult.terminationError) throw processResult.terminationError;
-    if (executionMismatch) throw executionMismatch;
-    if (processResult.aborted) throw processFailure("Codex", processResult);
+    if (processResult.terminationError) {
+      throw processFailure(
+        "Codex",
+        processResult,
+        hasConfiguredExecution ? configuredExecution : undefined,
+        observedExecution,
+      );
+    }
+    if (executionMismatch) {
+      executionMismatch.agentProcess = toAgentProcessEvidence(processResult);
+      throw executionMismatch;
+    }
     if (
       observedExecution?.threadId &&
       (observedExecution.model === undefined || observedExecution.reasoningEffort === undefined)
@@ -178,11 +238,22 @@ export class CodexAdapter implements AgentAdapter {
         );
       }
     }
-    if (executionMismatch) throw executionMismatch;
-    if (processResult.timedOut || processResult.exitCode !== 0) throw processFailure("Codex", processResult);
+    if (executionMismatch) {
+      executionMismatch.agentProcess = toAgentProcessEvidence(processResult);
+      throw executionMismatch;
+    }
+    if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
+      throw processFailure(
+        "Codex",
+        processResult,
+        hasConfiguredExecution ? configuredExecution : undefined,
+        observedExecution,
+      );
+    }
     const raw = await readFile(outputPath, "utf8");
     return {
       ...processResult,
+      agentProcess: toAgentProcessEvidence(processResult),
       handoff: parseHandoff(raw),
       ...(hasConfiguredExecution ? { configuredExecution } : {}),
       ...(observedExecution === undefined ? {} : { observedExecution }),
@@ -265,7 +336,7 @@ class ClaudeProtocolAdapter implements AgentAdapter {
       writeFile(join(request.artifactsDirectory, `${request.node.id}.${this.artifactStem}.stdout.json`), processResult.stdout, "utf8"),
       writeFile(join(request.artifactsDirectory, `${request.node.id}.${this.artifactStem}.stderr.txt`), processResult.stderr, "utf8"),
     ]);
-    if (processResult.terminationError) throw processResult.terminationError;
+    if (processResult.terminationError) throw processFailure(this.providerLabel, processResult);
     if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
       throw processFailure(this.providerLabel, processResult);
     }
@@ -274,6 +345,7 @@ class ClaudeProtocolAdapter implements AgentAdapter {
     const modelUsage = findModelUsage(parsed);
     return {
       ...processResult,
+      agentProcess: toAgentProcessEvidence(processResult),
       handoff: validateHandoff(candidate),
       ...(modelUsage ? { modelUsage } : {}),
     };
@@ -296,6 +368,7 @@ interface ProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  observedExitCode: number | null;
   timedOut: boolean;
   aborted: boolean;
   timeoutMs: number;
@@ -355,6 +428,7 @@ async function runProcess(
         stdout,
         stderr,
         exitCode: code ?? 1,
+        observedExitCode: code,
         timedOut,
         aborted,
         timeoutMs,
@@ -927,12 +1001,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function processFailure(provider: string, result: ProcessResult): Error {
-  if (result.aborted) return abortError(`${provider} cancelled`);
-  if (result.timedOut) return new Error(`${provider} timed out after ${result.timeoutMs}ms`);
-  const detail =
-    result.stderr.trim() || providerResultDetail(result) || result.stdout.trim() || "no output";
-  return new Error(`${provider} exited ${result.exitCode}: ${detail.slice(-2_000)}`);
+function processFailure(
+  provider: string,
+  result: ProcessResult,
+  configuredExecution?: ConfiguredExecution,
+  observedExecution?: ObservedExecution,
+): AgentProcessFailureDetails & Error {
+  const process = toAgentProcessEvidence(result);
+  const terminationDetail = result.terminationError === undefined
+    ? ""
+    : `; ${result.terminationError.message}`;
+  let message: string;
+  if (result.aborted) {
+    message = `${provider} cancelled${terminationDetail}`;
+  } else if (result.timedOut) {
+    message = `${provider} timed out after ${result.timeoutMs}ms${terminationDetail}`;
+  } else {
+    const detail =
+      result.stderr.trim() || providerResultDetail(result) || result.stdout.trim() || "no output";
+    const exitCode = result.observedExitCode === null ? "unknown" : result.observedExitCode;
+    message = `${provider} exited ${exitCode}: ${detail.slice(-2_000)}${terminationDetail}`;
+  }
+  return result.terminationError === undefined
+    ? new AgentProcessFailureError(message, process, configuredExecution, observedExecution)
+    : new NonRetryableAgentProcessFailureError(message, process, configuredExecution, observedExecution);
+}
+
+function toAgentProcessEvidence(result: ProcessResult): AgentProcessEvidence {
+  return {
+    exitCode: result.observedExitCode,
+    timedOut: result.timedOut,
+    aborted: result.aborted,
+    timeoutMs: result.timeoutMs,
+    ...(result.terminationError === undefined ? {} : { terminationError: result.terminationError.message }),
+  };
 }
 
 function abortError(message = "operation cancelled"): Error {
