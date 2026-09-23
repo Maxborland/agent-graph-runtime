@@ -1,0 +1,11 @@
+# AGR development team. Loaded only for a trusted checkout.
+# Keep host approval, sandbox, authentication, and provider settings inherited.
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+
+[agents]
+# Do not force enabled=true: AGR nodes disable multi-agent tools via CLI flags.
+# Current Codex enables subagents by default for interactive development.
+max_concurrent_threads_per_session = 4
+default_subagent_model = "gpt-6-luna"
+default_subagent_reasoning_effort = "max"

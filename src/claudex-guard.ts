@@ -12,7 +12,7 @@ interface ToolUseInput {
 
 const fileTools = new Set(["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"]);
 const standaloneAgrProgressPattern =
-  /^\s*agr(?:\.exe|\.cmd|\.ps1)?\s+progress\s+--phase\s+[a-z][a-z0-9_-]{0,31}\s+--message\s+(?:"[^"\r\n]{1,240}"|'[^'\r\n]{1,240}')(?:\s+--percent\s+(?:100|[1-9]?\d))?\s*$/i;
+  /^[ \t]*agr(?:\.exe|\.cmd|\.ps1)?[ \t]+progress[ \t]+--phase[ \t]+[a-z][a-z0-9_-]{0,31}[ \t]+--message[ \t]+(?:"[\p{L}\p{N} _.,:\/'-]{1,240}"|'[\p{L}\p{N} _.,:\/-]{1,240}')(?:[ \t]+--percent[ \t]+(?:100|[1-9]?\d))?[ \t]*$/iu;
 const playwrightPrefix = "mcp__plugin_playwright_playwright__";
 
 export function evaluateClaudexToolUse(

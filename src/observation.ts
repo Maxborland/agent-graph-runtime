@@ -2,8 +2,9 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CliError } from "./cli-error.js";
+import { runArtifactDirectory } from "./artifact-path.js";
 import { inspectRunLock } from "./run-lock.js";
-import type { RunEvent, RunState } from "./types.js";
+import type { GraphDefinition, RunEvent, RunState } from "./types.js";
 
 export interface RunObservationSnapshot {
   runId: string;
@@ -31,6 +32,7 @@ export interface RunInspection {
     silentForMs: number;
     latestMilestone?: { phase?: string; message?: string; percent?: number; at: string };
   }>;
+  pendingAcceptanceNodes: Array<{ id: string; attempts: number }>;
   attentionNodes: Array<{ id: string; error?: string }>;
   advisorBlocker?: { id: string; severity: "blocker"; summary: string; evidenceFile: string };
 }
@@ -64,6 +66,7 @@ const runEventTypes = new Set<RunEvent["type"]>([
   "run_started",
   "approval_required",
   "node_started",
+  "node_execution_finished",
   "node_activity",
   "node_progress",
   "node_accepted",
@@ -98,7 +101,10 @@ export class RunObserver {
       cursor: events.at(-1)?.seq ?? after,
       events,
       activeNodes: Object.entries(state.nodes)
-        .filter(([, node]) => node.status === "running")
+        .filter(
+          ([id, node]) =>
+            node.status === "running" && !executionFinishedInCurrentAttempt(id, node.attempts, history),
+        )
         .map(([id, node]) => ({ id, attempts: node.attempts })),
       state,
     };
@@ -122,18 +128,20 @@ export class RunObserver {
       readRunStateArtifact(this.repositoryRoot, this.runId),
       readRunEventArtifact(this.repositoryRoot, this.runId),
     ]);
-    const activeNodes = Object.entries(state.nodes)
+    const runningNodes = Object.entries(state.nodes)
       .filter(([, node]) => node.status === "running")
       .map(([id, node]) => {
-        const nodeEvents = events.filter((event) => event.nodeId === id);
-        const started = [...nodeEvents].reverse().find((event) => event.type === "node_started");
-        const latest = nodeEvents.at(-1) ?? started;
-        const milestone = [...nodeEvents].reverse().find((event) => event.type === "node_progress");
+        const attemptEvents = currentAttemptEvents(id, node.attempts, events);
+        const executionFinished = attemptEvents.events.some((event) => event.type === "node_execution_finished");
+        const started = attemptEvents.started;
+        const latest = attemptEvents.events.at(-1) ?? started;
+        const milestone = [...attemptEvents.events].reverse().find((event) => event.type === "node_progress");
         const startedAt = Date.parse(started?.at ?? state.updatedAt);
         const lastAt = Date.parse(latest?.at ?? started?.at ?? state.updatedAt);
         return {
           id,
           attempts: node.attempts,
+          executionFinished,
           elapsedMs: Math.max(0, now - startedAt),
           silentForMs: Math.max(0, now - lastAt),
           ...(milestone
@@ -145,15 +153,22 @@ export class RunObserver {
                   at: milestone.at,
                 },
               }
-            : {}),
+          : {}),
         };
       });
+    const activeNodes = runningNodes
+      .filter((node) => !node.executionFinished)
+      .map(({ executionFinished: _executionFinished, ...node }) => node);
+    const pendingAcceptanceNodes = runningNodes
+      .filter((node) => node.executionFinished)
+      .map(({ id, attempts }) => ({ id, attempts }));
     return {
       runId: state.runId,
       status: state.status,
       cursor: events.at(-1)?.seq ?? 0,
       updatedAt: state.updatedAt,
       activeNodes,
+      pendingAcceptanceNodes,
       attentionNodes: Object.entries(state.nodes)
         .filter(([, node]) => Boolean(node.retryBlocked))
         .map(([id, node]) => ({ id, ...(node.lastError === undefined ? {} : { error: node.lastError }) })),
@@ -170,7 +185,7 @@ export class RunObserver {
     };
   }
 
-  async explain(): Promise<RunStopExplanation> {
+  async explain(graph?: GraphDefinition): Promise<RunStopExplanation> {
     const state = await readRunStateArtifact(this.repositoryRoot, this.runId);
     const issues: RunStopIssue[] = [];
     if (state.status === "running") {
@@ -215,6 +230,9 @@ export class RunObserver {
         const termination = /unconfirmed .*process-tree termination|failed to terminate/i.test(node.lastError);
         const checkFailure = /failed checks:/i.test(node.lastError);
         const semanticBlock = /agent status (partial|blocked)/i.test(node.lastError);
+        const definition = graph?.nodes.find((candidate) => candidate.id === nodeId);
+        const attemptsInGeneration = node.generationAttempts ?? node.attempts;
+        const attemptBudgetExhausted = definition !== undefined && attemptsInGeneration >= definition.maxAttempts;
         issues.push({
           code: termination
             ? "PROCESS_TERMINATION_UNCONFIRMED"
@@ -228,7 +246,9 @@ export class RunObserver {
           detail: node.lastError,
           nextAction: node.retryBlocked
             ? `Inspect the node evidence and partial effects, then run agr retry ${nodeId} explicitly.`
-            : "Inspect the node evidence, correct the cause, then resume with agr run.",
+            : attemptBudgetExhausted
+              ? `Inspect the node evidence, correct the cause, then run agr retry ${nodeId} explicitly; its automatic attempt budget is exhausted.`
+              : "Inspect the node evidence, correct the cause, then resume with agr run.",
         });
       }
     }
@@ -256,6 +276,11 @@ export class RunObserver {
         await delay(intervalMs);
         continue;
       }
+      const owner = await inspectRunLock(this.repositoryRoot, this.runId);
+      if (!["live", "foreign", "initializing"].includes(owner.status)) {
+        if ((await this.read(cursor, 100)).terminal) continue;
+        throw missingRunOwner(this.runId);
+      }
       if (snapshot.events.length === 0) {
         yield {
           at: new Date().toISOString(),
@@ -272,7 +297,7 @@ export class RunObserver {
 
 export async function readRunStateArtifact(repositoryRoot: string, runId: string): Promise<RunState> {
   try {
-    return JSON.parse(await readFile(join(runRoot(repositoryRoot, runId), "state.json"), "utf8")) as RunState;
+    return JSON.parse(await readFile(join(runArtifactDirectory(repositoryRoot, runId), "state.json"), "utf8")) as RunState;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new CliError(`run ${runId} has no state yet; start it with agr run`, 3, "RUN_NOT_FOUND");
@@ -283,7 +308,7 @@ export async function readRunStateArtifact(repositoryRoot: string, runId: string
 
 export async function readRunEventArtifact(repositoryRoot: string, runId: string): Promise<RunEvent[]> {
   try {
-    return parseRunEventLog(await readFile(join(runRoot(repositoryRoot, runId), "events.jsonl"), "utf8"));
+    return parseRunEventLog(await readFile(join(runArtifactDirectory(repositoryRoot, runId), "events.jsonl"), "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new CliError(`run ${runId} has no events yet; start it with agr run`, 3, "RUN_NOT_FOUND");
@@ -314,6 +339,9 @@ export function parseRunEventLog(raw: string): RunEvent[] {
     }
     if (value.percent !== undefined && (typeof value.percent !== "number" || !Number.isFinite(value.percent))) {
       throw invalidEventLog(index + 1, "percent must be a finite number");
+    }
+    if (value.attempt !== undefined && (!Number.isInteger(value.attempt) || (value.attempt as number) < 1)) {
+      throw invalidEventLog(index + 1, "attempt must be a positive integer");
     }
     if (value.severity !== undefined && !["note", "concern", "blocker"].includes(String(value.severity))) {
       throw invalidEventLog(index + 1, "severity must be note, concern, or blocker");
@@ -352,14 +380,40 @@ function invalidEventLog(line: number, detail: string): CliError {
   );
 }
 
-function runRoot(repositoryRoot: string, runId: string): string {
-  return join(repositoryRoot, ".agent-graph", "runs", runId);
-}
-
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function isTerminalEvent(event: RunEvent): boolean {
   return ["run_completed", "run_failed", "run_needs_attention", "run_cancelled", "approval_required"].includes(event.type);
+}
+
+function currentAttemptEvents(
+  nodeId: string,
+  attempt: number,
+  events: RunEvent[],
+): { started?: RunEvent; events: RunEvent[] } {
+  const nodeEvents = events.filter((event) => event.nodeId === nodeId);
+  const started = [...nodeEvents].reverse().find((event) => event.type === "node_started");
+  if (!started || (started.attempt !== undefined && started.attempt !== attempt)) return { events: [] };
+  return {
+    started,
+    events: nodeEvents.filter(
+      (event) => event.seq >= started.seq && (event.attempt === undefined || event.attempt === attempt),
+    ),
+  };
+}
+
+function executionFinishedInCurrentAttempt(nodeId: string, attempt: number, events: RunEvent[]): boolean {
+  return currentAttemptEvents(nodeId, attempt, events).events.some(
+    (event) => event.type === "node_execution_finished",
+  );
+}
+
+function missingRunOwner(runId: string): CliError {
+  return new CliError(
+    `run ${runId} is recorded as running but has no live owner; resume it with agr run`,
+    1,
+    "RUN_OWNER_MISSING",
+  );
 }

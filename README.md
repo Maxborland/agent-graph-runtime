@@ -61,8 +61,12 @@ agr inspect --json
 agr why --json
 ```
 
-Every durable safe event carries a monotonic `seq` cursor. Synthetic observer
-heartbeats do not advance it.
+New run logs persist a monotonic `seq` cursor on every durable safe event.
+Legacy logs keep their original append-only format when resumed and expose
+line-order cursors when read. Synthetic observer heartbeats do not advance them.
+`agr inspect` distinguishes active execution from work awaiting wave acceptance;
+a previous attempt's milestone is never reused for a new attempt. If `follow`
+detects that a running record has lost its owner, it exits with recovery guidance.
 
 At a gate, `agr run` exits with code 2. The runtime cannot approve for you:
 
@@ -116,6 +120,15 @@ for a safe graph that exercises both native adapters,
 proxy-routed launcher, and
 [skills/agent-graph-runtime/references/graph-format.md](skills/agent-graph-runtime/references/graph-format.md)
 for the complete graph format.
+
+## Developing AGR with a Codex team
+
+This repository includes project-local Codex roles: an Astra orchestrator,
+Luna explorer/worker/tester/researcher, and an independent Astra reviewer.
+Start a fresh Codex session in this trusted checkout and use `$agr-development`.
+See [the development guide](docs/development.md) for the workflow, repository map,
+ownership rules, and checks. This team develops AGR; runtime graph execution uses
+the separate workflow below.
 
 ## Astra / Luna workflow
 

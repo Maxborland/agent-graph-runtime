@@ -47,6 +47,17 @@ exploration outside the review sandbox even when a node has no explicit
 }
 ```
 
+## Identifiers
+
+`run.id` and each node `id` must be a safe single filename component. Ordinary
+spaces and Unicode are supported. Empty or whitespace-only names, `.`/`..`, path
+separators, control characters, Windows-reserved punctuation (`<>:"|?*`), trailing
+ASCII spaces/dots, and Windows device names are rejected. Device names include
+CON, PRN, AUX, NUL, COM1–9, LPT1–9 (also superscript ¹²³ variants), CONIN$,
+CONOUT$, and CLOCK$, case-insensitively and with filename extensions.
+Unsafe legacy identifiers require a new safe run ID; AGR does not move or rewrite
+their artifacts automatically.
+
 ## Node types
 
 - `agent`: writable Codex or Claude implementation.
@@ -72,6 +83,9 @@ explicit `agr advisor acknowledge` after evidence inspection.
   protocol. Do not set `model`; the launcher owns routing and context. Claudex
   nodes execute directly and cannot launch `Workflow`, `Task`, `Agent`, or hidden subagents.
 - `shell`: deterministic commands from `checks`; use only for trusted graphs.
+  `agent` and `review` require an agent executor and cannot use `shell`; use a
+  `verify` node for deterministic verification or an authorized `external_action`
+  for external effects.
 
 ## Claudex model evidence
 

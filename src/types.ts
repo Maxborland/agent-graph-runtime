@@ -126,6 +126,7 @@ export interface RunEvent {
   at: string;
   type: RunEventType;
   nodeId?: string;
+  attempt?: number;
   detail?: string;
   phase?: string;
   percent?: number;
@@ -139,6 +140,7 @@ export type RunEventType =
   | "run_started"
   | "approval_required"
   | "node_started"
+  | "node_execution_finished"
   | "node_activity"
   | "node_progress"
   | "node_accepted"

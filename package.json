@@ -12,6 +12,7 @@
     "examples",
     "docs/SPEC.md",
     "docs/astra-luna.md",
+    "docs/development.md",
     "docs/commerce-runtime.md",
     "README.md",
     "LICENSE"

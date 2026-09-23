@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -61,9 +61,16 @@ test(
     const fakeTaskkill = join(root, "taskkill.exe");
     const childScript = join(root, "child.mjs");
     const pidPath = join(root, "child.pid");
+    const secondCheckScript = join(root, "second-check.cjs");
+    const secondCheckMarker = join(root, "second-check-ran");
     const previousNodeEnv = process.env.NODE_ENV;
     const previousTaskkill = process.env.AGR_TEST_TASKKILL_PATH;
     await writeFile(fakeTaskkill, "not executable", "utf8");
+    await writeFile(
+      secondCheckScript,
+      `require("node:fs").writeFileSync(${JSON.stringify(secondCheckMarker)}, "ran");\n`,
+      "utf8",
+    );
     await writeFile(
       childScript,
       `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); setTimeout(() => {}, 10000);`,
@@ -74,11 +81,16 @@ test(
     try {
       const results = await runChecks(
         root,
-        [`${JSON.stringify(process.execPath)} ${JSON.stringify(childScript)}`],
+        [
+          `${JSON.stringify(process.execPath)} ${JSON.stringify(childScript)}`,
+          `${JSON.stringify(process.execPath)} ${JSON.stringify(secondCheckScript)}`,
+        ],
         100,
       );
       assert.equal(results[0]!.timedOut, true);
       assert.match(results[0]!.terminationError ?? "", /spawn|taskkill/i);
+      assert.equal(results.length, 1);
+      await assert.rejects(access(secondCheckMarker), { code: "ENOENT" });
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;

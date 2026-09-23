@@ -96,6 +96,130 @@ test("event reader assigns line-order cursors to legacy logs", async () => {
   }
 });
 
+test("store preserves the legacy event format when appending after resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-legacy-resume-"));
+  try {
+    const firstStore = await RunStore.open(root, graph, []);
+    const legacy = [
+      { at: "2026-08-16T00:00:00.000Z", type: "run_started" },
+      { at: "2026-08-16T00:00:01.000Z", type: "node_started", nodeId: "first" },
+    ].map((event) => JSON.stringify(event)).join("\n") + "\n";
+    await writeFile(firstStore.eventsPath, legacy, "utf8");
+
+    const resumed = await RunStore.open(root, graph, []);
+    await resumed.appendEvent({ at: "2026-08-16T00:00:02.000Z", type: "node_accepted", nodeId: "first" });
+
+    const raw = await readFile(resumed.eventsPath, "utf8");
+    assert.ok(raw.startsWith(legacy));
+    const records = raw.trim().split(/\r?\n/).map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert(records.every((record) => !Object.hasOwn(record, "seq")));
+    assert.deepEqual((await readRunEvents(root, graph.run.id)).map((event) => event.seq), [1, 2, 3]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("store resumes cursor events after the last sequence even when history has gaps", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-sequence-gaps-"));
+  try {
+    const firstStore = await RunStore.open(root, graph, []);
+    const events = [
+      { seq: 5, at: "2026-08-16T00:00:00.000Z", type: "run_started" },
+      { seq: 10, at: "2026-08-16T00:00:01.000Z", type: "state_saved", detail: "old" },
+    ];
+    await writeFile(firstStore.eventsPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+
+    const resumed = await RunStore.open(root, graph, []);
+    const appended = await resumed.appendEvent({ at: "2026-08-16T00:00:02.000Z", type: "state_saved", detail: "resume" });
+
+    assert.equal(appended.seq, 11);
+    const persisted = (await readFile(resumed.eventsPath, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line) as { seq: number });
+    assert.equal(persisted.at(-1)?.seq, 11);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("store separates a resumed legacy event when the final record has no newline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-legacy-no-newline-"));
+  try {
+    const firstStore = await RunStore.open(root, graph, []);
+    const legacy = JSON.stringify({ at: "2026-08-16T00:00:00.000Z", type: "run_started" });
+    await writeFile(firstStore.eventsPath, legacy, "utf8");
+
+    const resumed = await RunStore.open(root, graph, []);
+    await resumed.appendEvent({ at: "2026-08-16T00:00:01.000Z", type: "node_started", nodeId: "first" });
+
+    const raw = await readFile(resumed.eventsPath, "utf8");
+    assert.ok(raw.startsWith(`${legacy}\n`));
+    assert.deepEqual((await readRunEvents(root, graph.run.id)).map((event) => event.seq), [1, 2]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("store separates a resumed cursor event when the final record has no newline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-cursor-no-newline-"));
+  try {
+    const firstStore = await RunStore.open(root, graph, []);
+    const cursorEvent = JSON.stringify({ seq: 7, at: "2026-08-16T00:00:00.000Z", type: "run_started" });
+    await writeFile(firstStore.eventsPath, cursorEvent, "utf8");
+
+    const resumed = await RunStore.open(root, graph, []);
+    const appended = await resumed.appendEvent({ at: "2026-08-16T00:00:01.000Z", type: "state_saved", detail: "resume" });
+
+    assert.equal(appended.seq, 8);
+    const raw = await readFile(resumed.eventsPath, "utf8");
+    assert.ok(raw.startsWith(`${cursorEvent}\n`));
+    assert.deepEqual((await readRunEvents(root, graph.run.id)).map((event) => event.seq), [7, 8]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("store refuses malformed or mixed event logs without changing their bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-invalid-resume-"));
+  try {
+    const firstStore = await RunStore.open(root, graph, []);
+    const invalidLogs = [
+      `${JSON.stringify({ at: "2026-08-16T00:00:00.000Z", type: "run_started" })}\n{broken\n`,
+      [
+        { at: "2026-08-16T00:00:00.000Z", type: "run_started" },
+        { seq: 2, at: "2026-08-16T00:00:01.000Z", type: "state_saved" },
+      ].map((event) => JSON.stringify(event)).join("\n") + "\n",
+    ];
+    for (const invalid of invalidLogs) {
+      await writeFile(firstStore.eventsPath, invalid, "utf8");
+      await assert.rejects(
+        RunStore.open(root, graph, []),
+        (error: unknown) => (error as { code?: string }).code === "EVENT_LOG_INVALID",
+      );
+      assert.equal(await readFile(firstStore.eventsPath, "utf8"), invalid);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("direct store open rejects unsafe run and node IDs before creating artifact paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-store-unsafe-id-"));
+  const unsafeRun: GraphDefinition = JSON.parse(JSON.stringify(graph)) as GraphDefinition;
+  unsafeRun.run.id = "../escaped";
+  const unsafeNode: GraphDefinition = JSON.parse(JSON.stringify(graph)) as GraphDefinition;
+  unsafeNode.nodes[0]!.id = "nested/node";
+  try {
+    for (const candidate of [unsafeRun, unsafeNode]) {
+      await assert.rejects(
+        RunStore.open(root, candidate, []),
+        (error: unknown) => (error as { code?: string }).code === "INVALID_ARTIFACT_ID",
+      );
+      await assert.rejects(readFile(join(root, ".agent-graph"), "utf8"), { code: "ENOENT" });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("event reader reports a malformed historical line as an artifact error", async () => {
   const root = await mkdtemp(join(tmpdir(), "agr-store-invalid-events-"));
   try {

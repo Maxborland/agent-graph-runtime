@@ -42,6 +42,7 @@ export interface RunProgressEvent {
     | "run_started"
     | "approval_required"
     | "node_started"
+    | "node_execution_finished"
     | "node_activity"
     | "node_progress"
     | "heartbeat"
@@ -55,6 +56,7 @@ export interface RunProgressEvent {
     | "run_cancelled";
   runId: string;
   nodeId?: string;
+  attempt?: number;
   activeNodeIds?: string[];
   elapsedMs?: number;
   detail?: string;
@@ -83,6 +85,7 @@ interface NodeOutcome {
   error?: string;
   aborted?: boolean;
   retryBlocked?: boolean;
+  externalActionStarted?: boolean;
 }
 
 export class GraphRunner {
@@ -172,6 +175,7 @@ export class GraphRunner {
         await store.appendEvent({
           at: new Date().toISOString(),
           ...event,
+          attempt: store.state.nodes[node.id]!.attempts,
         });
         this.emitProgress({
           type: "node_started",
@@ -214,44 +218,65 @@ export class GraphRunner {
       try {
         outcomes = await Promise.all(
           ready.map(async (node) => {
+            let outcome: NodeOutcome | undefined;
             try {
-              const outcome = await this.executeNode(node, store, waveController.signal);
-              const claimedEscapes = claimedOwnershipEscapes(outcome);
-              if (outcome.retryBlocked || outcome.aborted || claimedEscapes.length) {
-                waveAttentionObserved = true;
-                waveController.abort();
-              }
-              // Inspect before deciding to retain a peer: a semantic finding is
-              // not safe merely because its handoff labels it blocked/partial.
-              if (!waveController.signal.aborted) {
-                try {
-                  const escaped = await findUnexpectedChanges(
-                    this.repositoryRoot, waveBaseline, waveOwnership, this.options.signal,
-                  );
-                  for (const path of escaped) earlyEscapedPaths.add(path);
-                } catch (error) {
-                  earlyEscapedPaths.add("<ownership inspection failed: " + messageOf(error) + ">");
-                }
-              }
-              const unsafe = Boolean(outcome.retryBlocked || outcome.aborted ||
-                claimedEscapes.length || earlyEscapedPaths.size ||
-                (retainReadOnly && outcome.error));
-              if (unsafe || (outcomeRequiresAttention(outcome) && !retainReadOnly)) {
-                waveAttentionObserved = true;
-                outcome.retryBlocked = true;
-                waveController.abort();
-              } else if (waveAttentionObserved) {
-                outcome.retryBlocked = true;
-                outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
-              }
-              if (waveController.signal.aborted && !outcomeRequiresAttention(outcome)) {
-                outcome.retryBlocked = true;
-                outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
-              }
-              return outcome;
+              outcome = await this.executeNode(node, store, waveController.signal);
+            } catch (error) {
+              waveAttentionObserved = true;
+              waveController.abort();
+              throw error;
             } finally {
               activeNodeIds.delete(node.id);
+              const attempt = store.state.nodes[node.id]!.attempts;
+              if (outcome) {
+                const claimedEscapes = claimedOwnershipEscapes(outcome);
+                const semanticStop = outcome.adapterResult?.handoff.status === "partial" ||
+                  outcome.adapterResult?.handoff.status === "blocked";
+                if (outcome.retryBlocked || outcome.aborted || claimedEscapes.length ||
+                  (semanticStop && !retainReadOnly)) {
+                  // Semantic stops cancel peers synchronously before event I/O or ownership inspection.
+                  waveAttentionObserved = true;
+                  waveController.abort();
+                }
+              }
+              await store.appendEvent({
+                at: new Date().toISOString(),
+                type: "node_execution_finished",
+                nodeId: node.id,
+                attempt,
+              });
+              this.emitProgress({ type: "node_execution_finished", nodeId: node.id, attempt });
             }
+            if (!outcome) throw new Error(`node "${node.id}" finished without an outcome`);
+            const claimedEscapes = claimedOwnershipEscapes(outcome);
+            // Inspect before deciding to retain a peer: a semantic finding is
+            // not safe merely because its handoff labels it blocked/partial.
+            if (!waveController.signal.aborted) {
+              try {
+                const escaped = await findUnexpectedChanges(
+                  this.repositoryRoot, waveBaseline, waveOwnership, this.options.signal,
+                );
+                for (const path of escaped) earlyEscapedPaths.add(path);
+              } catch (error) {
+                earlyEscapedPaths.add("<ownership inspection failed: " + messageOf(error) + ">");
+              }
+            }
+            const unsafe = Boolean(outcome.retryBlocked || outcome.aborted ||
+              claimedEscapes.length || earlyEscapedPaths.size ||
+              (retainReadOnly && outcome.error));
+            if (unsafe || (outcomeRequiresAttention(outcome) && !retainReadOnly)) {
+              waveAttentionObserved = true;
+              outcome.retryBlocked = true;
+              waveController.abort();
+            } else if (waveAttentionObserved) {
+              outcome.retryBlocked = true;
+              outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
+            }
+            if (waveController.signal.aborted && !outcomeRequiresAttention(outcome)) {
+              outcome.retryBlocked = true;
+              outcome.error ??= "node completed after another node required operator attention; reconcile partial effects before agr retry";
+            }
+            return outcome;
           }),
         );
       } finally {
@@ -323,7 +348,13 @@ export class GraphRunner {
       }
       if (node.executor === "shell") {
         const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
-        return { node, prompt, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
+        return {
+          node,
+          prompt,
+          checks,
+          externalActionStarted,
+          retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)),
+        };
       }
       const adapter = node.executor ? this.adapters[node.executor] : undefined;
       if (!adapter) throw new Error(`executor "${node.executor ?? "none"}" is unavailable`);
@@ -371,7 +402,14 @@ export class GraphRunner {
         await progressChannel?.close().catch(() => undefined);
       }
       const checks = await runChecks(this.repositoryRoot, node.checks, timeoutMs, signal);
-      return { node, prompt, adapterResult, checks, retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)) };
+      return {
+        node,
+        prompt,
+        adapterResult,
+        checks,
+        externalActionStarted,
+        retryBlocked: checks.some((check) => Boolean(check.terminationError) || (externalActionStarted && check.exitCode !== 0)),
+      };
     } catch (error) {
       const processFailure = getAgentProcessFailureDetails(error);
       return {
@@ -395,6 +433,7 @@ export class GraphRunner {
         ),
         retryBlocked: externalActionStarted || error instanceof NonRetryableAdapterError || error instanceof DependencyContextError ||
           (processFailure?.retryBlocked ?? false),
+        externalActionStarted,
       };
     }
   }
@@ -420,8 +459,6 @@ export class GraphRunner {
       : undefined;
     const semanticAttention = outcome.adapterResult?.handoff.status === "partial" ||
       outcome.adapterResult?.handoff.status === "blocked";
-    const retryBlocked = Boolean(outcome.retryBlocked || semanticAttention ||
-      waveEscapedPaths.length || claimedEscapes.length);
     const failures = [
       outcome.error,
       handoffFailure,
@@ -433,6 +470,9 @@ export class GraphRunner {
       ...outcome.checks.flatMap((check) => check.terminationError ? [`unconfirmed check process-tree termination: ${check.terminationError}`] : []),
       ...modelUsageFailures,
     ].filter((value): value is string => Boolean(value));
+    const retryBlocked = Boolean(outcome.retryBlocked || semanticAttention ||
+      waveEscapedPaths.length || claimedEscapes.length ||
+      (outcome.externalActionStarted && failures.length > 0));
 
     const attempt = nodeState.attempts;
     const evidencePath = join(store.evidenceDirectory, `${outcome.node.id}-attempt-${attempt}.json`);

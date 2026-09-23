@@ -197,6 +197,14 @@ export class CodexAdapter implements AgentAdapter {
         observedExecution,
       );
     }
+    if (processResult.stdinError) {
+      throw processFailure(
+        "Codex",
+        processResult,
+        hasConfiguredExecution ? configuredExecution : undefined,
+        observedExecution,
+      );
+    }
     if (executionMismatch) {
       executionMismatch.agentProcess = toAgentProcessEvidence(processResult);
       throw executionMismatch;
@@ -242,7 +250,10 @@ export class CodexAdapter implements AgentAdapter {
       executionMismatch.agentProcess = toAgentProcessEvidence(processResult);
       throw executionMismatch;
     }
-    if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
+    if (
+      processResult.aborted || processResult.timedOut || processResult.exitCode !== 0 ||
+      processResult.stdinError !== undefined
+    ) {
       throw processFailure(
         "Codex",
         processResult,
@@ -337,7 +348,10 @@ class ClaudeProtocolAdapter implements AgentAdapter {
       writeFile(join(request.artifactsDirectory, `${request.node.id}.${this.artifactStem}.stderr.txt`), processResult.stderr, "utf8"),
     ]);
     if (processResult.terminationError) throw processFailure(this.providerLabel, processResult);
-    if (processResult.aborted || processResult.timedOut || processResult.exitCode !== 0) {
+    if (
+      processResult.aborted || processResult.timedOut || processResult.exitCode !== 0 ||
+      processResult.stdinError !== undefined
+    ) {
       throw processFailure(this.providerLabel, processResult);
     }
     const parsed = processResult.lastResultRecord ?? lastJsonRecord(processResult.stdout);
@@ -373,6 +387,7 @@ interface ProcessResult {
   aborted: boolean;
   timeoutMs: number;
   lastResultRecord?: unknown;
+  stdinError?: Error;
   terminationError?: NonRetryableAdapterError;
 }
 
@@ -407,6 +422,7 @@ async function runProcess(
     let aborted = false;
     let termination: Promise<void> | undefined;
     let terminationError: Error | undefined;
+    let stdinError: Error | undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
     let terminationDeadlineTimer: NodeJS.Timeout | undefined;
     let settled = false;
@@ -433,6 +449,7 @@ async function runProcess(
         aborted,
         timeoutMs,
         ...(lastResultRecord === undefined ? {} : { lastResultRecord }),
+        ...(stdinError === undefined ? {} : { stdinError }),
         ...(terminationError
           ? {
               terminationError: new NonRetryableAdapterError(
@@ -479,6 +496,9 @@ async function runProcess(
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr = append(stderr, chunk);
+    });
+    child.stdin?.on("error", (error) => {
+      stdinError ??= error;
     });
     child.once("error", (error) => {
       if (settled) return;
@@ -1011,16 +1031,19 @@ function processFailure(
   const terminationDetail = result.terminationError === undefined
     ? ""
     : `; ${result.terminationError.message}`;
+  const promptWriteDetail = result.stdinError === undefined
+    ? ""
+    : `; failed to write provider prompt: ${result.stdinError.message}`;
   let message: string;
   if (result.aborted) {
-    message = `${provider} cancelled${terminationDetail}`;
+    message = `${provider} cancelled${terminationDetail}${promptWriteDetail}`;
   } else if (result.timedOut) {
-    message = `${provider} timed out after ${result.timeoutMs}ms${terminationDetail}`;
+    message = `${provider} timed out after ${result.timeoutMs}ms${terminationDetail}${promptWriteDetail}`;
   } else {
     const detail =
       result.stderr.trim() || providerResultDetail(result) || result.stdout.trim() || "no output";
     const exitCode = result.observedExitCode === null ? "unknown" : result.observedExitCode;
-    message = `${provider} exited ${exitCode}: ${detail.slice(-2_000)}${terminationDetail}`;
+    message = `${provider} exited ${exitCode}: ${detail.slice(-2_000)}${terminationDetail}${promptWriteDetail}`;
   }
   return result.terminationError === undefined
     ? new AgentProcessFailureError(message, process, configuredExecution, observedExecution)

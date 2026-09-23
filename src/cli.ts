@@ -163,7 +163,7 @@ async function main(args: string[]): Promise<void> {
       throw new CliError("--heartbeat-ms must be a positive number", 3, "INVALID_ARGUMENT");
     }
     const lock = await acquireRunLock(repositoryRoot, graph.run.id);
-    const cancellationPath = join(repositoryRoot, ".agent-graph", "runs", graph.run.id, `cancel.${lock.record.token}.requested`);
+    const cancellationPath = join(runDirectory(repositoryRoot, graph.run.id), `cancel.${lock.record.token}.requested`);
     const controller = new AbortController();
     const onInterrupt = (): void => controller.abort();
     process.once("SIGINT", onInterrupt);
@@ -200,7 +200,7 @@ async function main(args: string[]): Promise<void> {
     if (!inspection.record || !["live", "foreign"].includes(inspection.status)) {
       throw new CliError(`run ${graph.run.id} has no live owner to cancel`, 3, "RUN_NOT_ACTIVE");
     }
-    const cancellationPath = join(repositoryRoot, ".agent-graph", "runs", graph.run.id, `cancel.${inspection.record.token}.requested`);
+    const cancellationPath = join(runDirectory(repositoryRoot, graph.run.id), `cancel.${inspection.record.token}.requested`);
     await writeFile(cancellationPath, `${new Date().toISOString()}\n`, { encoding: "utf8", flag: "wx" }).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     });
@@ -336,6 +336,7 @@ async function main(args: string[]): Promise<void> {
           : "";
         console.log(`  ${node.id}: active ${Math.floor(node.elapsedMs / 1_000)}s · silent ${Math.floor(node.silentForMs / 1_000)}s${milestone}`);
       }
+      for (const node of inspection.pendingAcceptanceNodes) console.log(`  ${node.id}: execution finished · awaiting acceptance`);
       for (const node of inspection.attentionNodes) console.log(`  ${node.id}: attention${node.error ? ` — ${node.error}` : ""}`);
     }
     return;
@@ -343,7 +344,7 @@ async function main(args: string[]): Promise<void> {
 
   if (command === "why") {
     const { graph, repositoryRoot } = await loadGraph(positional(args.slice(1))[0]);
-    const explanation = await new RunObserver(repositoryRoot, graph.run.id).explain();
+    const explanation = await new RunObserver(repositoryRoot, graph.run.id).explain(graph);
     if (json) console.log(JSON.stringify(explanation, null, 2));
     else {
       console.log(`${explanation.runId}: ${explanation.status}`);
@@ -515,6 +516,9 @@ function printProgress(event: RunProgressEvent): void {
       break;
     case "node_started":
       message = `${event.nodeId ?? "node"} started${event.detail ? ` (${event.detail})` : ""}`;
+      break;
+    case "node_execution_finished":
+      message = `${event.nodeId ?? "node"} execution finished; awaiting acceptance`;
       break;
     case "node_activity":
       message = `${event.nodeId ?? "node"}: ${event.detail ?? "provider activity"}`;
