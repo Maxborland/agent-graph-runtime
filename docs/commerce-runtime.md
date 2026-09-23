@@ -61,7 +61,9 @@ The original finding remains failed and retry-blocked, the independent peer can
 be accepted with its full evidence, and the run ends `needs_attention` (exit 5).
 No next wave or advisor is started. A mixed wave containing implementation or
 external-action work retains immediate cancellation because its effects may be
-uncertain. User cancellation, claimed or detected ownership escapes, and unconfirmed
+uncertain. Known semantic stops signal cancellation before awaiting ownership
+scanning; final ownership checks still control acceptance. User cancellation,
+claimed or detected ownership escapes, and unconfirmed
 termination also stop peers. Under retention, an otherwise unclassified executor
 error conservatively stops the read-only wave; default ordinary provider failures
 retain their existing automatic retry behavior. A success returned

@@ -78,6 +78,12 @@ test("Claudex guard denies model-controlled Bash except the progress reporter", 
     "Get-Command pnpm -All",
     "tasklist.exe /FI \"PID eq 42060\"",
     "curl -sS http://127.0.0.1:3140/health",
+    // These substitutions must remain denied inside either quoting style, including Windows forms.
+    'agr progress --phase verify --message "$(touch /tmp/agr-guard-substitution)"',
+    'agr progress --phase verify --message "`touch /tmp/agr-guard-backtick`"',
+    'agr progress --phase verify --message "$(Write-Output dangerous)"',
+    'agr progress --phase verify --message "%COMSPEC%"',
+    "agr progress --phase verify --message '!PATH!'",
   ]) {
     assert.match(
       evaluateClaudexToolUse(
@@ -154,18 +160,19 @@ test("Claudex guard constrains pre-authorized Playwright tools", () => {
 });
 
 test("Claudex guard permits only a standalone AGR progress reporter command", () => {
-  assert.equal(
-    evaluateClaudexToolUse(
-      {
-        tool_name: "Bash",
-        tool_input: {
-          command: "agr progress --phase verify --message \"live Claudex progress channel works\" --percent 100",
-        },
-      },
-      repositoryRoot,
-    ),
-    undefined,
-  );
+  for (const command of [
+    'agr progress --phase verify --message "live Claudex progress channel works" --percent 100',
+    "agr progress --phase verify --message 'live Claudex progress channel works' --percent 100",
+    'agr progress --phase verify --message "прогресс, all clear: 100 points" --percent 100',
+  ]) {
+    assert.equal(
+      evaluateClaudexToolUse(
+        { tool_name: "Bash", tool_input: { command } },
+        repositoryRoot,
+      ),
+      undefined,
+    );
+  }
   assert.match(
     evaluateClaudexToolUse(
       {

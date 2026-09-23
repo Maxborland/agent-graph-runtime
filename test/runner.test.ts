@@ -676,6 +676,69 @@ test("runner rejects a Claudex node missing required model usage", async () => {
   }
 });
 
+test("missing usage evidence after an external action blocks automatic retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-external-model-usage-"));
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  let calls = 0;
+  const adapter: AgentAdapter = {
+    async execute() {
+      calls += 1;
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        handoff: { status: "complete", summary: "effect completed", changedFiles: [], verification: [], gaps: [] },
+      };
+    },
+  };
+  const graph: GraphDefinition = {
+    version: 1,
+    run: {
+      id: "external-model-usage",
+      objective: "Do not automatically repeat an effect after failed acceptance",
+      repository: ".",
+      maxConcurrency: 1,
+      allowExternalActions: true,
+    },
+    nodes: [
+      { id: "gate", type: "human_gate", target: "publish:fixture", needs: [], owns: [], checks: [], maxAttempts: 1 },
+      {
+        id: "publish",
+        type: "external_action",
+        executor: "claudex",
+        target: "publish:fixture",
+        prompt: "Publish once",
+        needs: ["gate"],
+        owns: [],
+        checks: [],
+        maxAttempts: 3,
+        requiredModelUsage: [
+          { model: "gpt-5.6-luna", provider: "firstParty", contextWindow: 262144 },
+        ],
+      },
+    ],
+  };
+
+  try {
+    assert.equal((await new GraphRunner(graph, root, { claudex: adapter }).run()).status, "awaiting_approval");
+    await new OperatorControl(graph, root).approve("gate", "publish:fixture");
+
+    const state = await new GraphRunner(graph, root, { claudex: adapter }).run();
+    assert.equal(state.status, "needs_attention");
+    assert.equal(state.nodes.publish!.retryBlocked, true);
+    assert.match(state.nodes.publish!.lastError ?? "", /missing required model usage/);
+    assert.equal(calls, 1, "a successfully executed external action is not repeated for missing telemetry");
+    const evidence = JSON.parse(
+      await readFile(join(root, ".agent-graph", "runs", graph.run.id, state.nodes.publish!.evidenceFiles[0]!), "utf8"),
+    ) as { retryBlocked?: boolean };
+    assert.equal(evidence.retryBlocked, true);
+    assert.equal((await new GraphRunner(graph, root, { claudex: adapter }).run()).status, "needs_attention");
+    assert.equal(calls, 1, "plain resume does not repeat the uncertain external effect");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runner accepts and persists matching required model usage", async () => {
   const root = await mkdtemp(join(tmpdir(), "agr-model-usage-match-"));
   await exec("git", ["init", "--quiet"], { cwd: root });
@@ -940,9 +1003,14 @@ test("semantic attention cancels still-running siblings in the same concurrent w
   const root = await mkdtemp(join(tmpdir(), "agr-attention-cancels-wave-"));
   await exec("git", ["init", "--quiet"], { cwd: root });
   let siblingCompleted = false;
+  let siblingSignal: AbortSignal | undefined;
+  let releaseSiblingStarted!: () => void;
+  const siblingStarted = new Promise<void>((resolveWait) => { releaseSiblingStarted = resolveWait; });
+  let stoppedAtExecutorFinish = false;
   const adapter: AgentAdapter = {
     async execute(request) {
       if (request.node.id === "attention") {
+        await siblingStarted;
         return {
           exitCode: 0,
           stdout: "",
@@ -950,6 +1018,8 @@ test("semantic attention cancels still-running siblings in the same concurrent w
           handoff: { status: "partial", summary: "inspect", changedFiles: [], verification: [], gaps: ["operator"] },
         };
       }
+      siblingSignal = request.signal;
+      releaseSiblingStarted();
       if (request.signal?.aborted) {
         const error = new Error("cancelled by wave attention");
         error.name = "AbortError";
@@ -985,9 +1055,17 @@ test("semantic attention cancels still-running siblings in the same concurrent w
   };
 
   try {
-    const state = await new GraphRunner(graph, root, { claudex: adapter }).run();
+    const state = await new GraphRunner(graph, root, { claudex: adapter }, {
+      onProgress(event) {
+        if (event.type === "node_execution_finished" && event.nodeId === "attention") {
+          stoppedAtExecutorFinish = siblingSignal?.aborted === true;
+          assert.equal(event.attempt, 1);
+        }
+      },
+    }).run();
     assert.equal(state.status, "needs_attention");
     assert.equal(siblingCompleted, false);
+    assert.equal(stoppedAtExecutorFinish, true, "semantic stop cancels peers before announcing executor completion");
     assert.equal(state.nodes.sibling!.status, "failed");
     assert.equal(state.nodes.sibling!.retryBlocked, true);
   } finally {

@@ -65,6 +65,29 @@ if (args[0] === "codex") {
   }
 });
 
+test("adapter reports an early provider exit while a large prompt is piped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-adapter-early-exit-"));
+  const fake = join(root, "early-exit.mjs");
+  await writeFile(fake, "import { writeSync } from 'node:fs'; writeSync(2, 'synthetic early provider exit'); process.exit(3);\n", "utf8");
+
+  try {
+    await assert.rejects(
+      new CodexAdapter(process.execPath, [fake]).execute({
+        node,
+        repositoryRoot: root,
+        prompt: "x".repeat(4 * 1024 * 1024),
+        artifactsDirectory: root,
+        timeoutMs: 10_000,
+      }),
+      /failed to write provider prompt:.*(?:EPIPE|EOF|broken pipe)/i,
+    );
+    assert.equal(await readFile(join(root, "adapter.codex.stderr.txt"), "utf8"), "synthetic early provider exit");
+    await access(join(root, "adapter.codex.stdout.jsonl"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex nodes disable nested multi-agent features", async () => {
   const root = await mkdtemp(join(tmpdir(), "agr-codex-direct-node-"));
   const fake = join(root, "capture-codex.mjs");

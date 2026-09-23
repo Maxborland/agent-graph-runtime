@@ -26,7 +26,7 @@ export async function runChecks(
     }
     const result = await runCheck(repositoryRoot, command, timeoutMs, signal);
     results.push(result);
-    if (result.cancelled) break;
+    if (result.cancelled || result.terminationError !== undefined) break;
   }
   return results;
 }

@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { PassiveAdvisor } from "../src/advisor.js";
 import type { AgentAdapter } from "../src/adapters.js";
+import { GraphRunner } from "../src/runner.js";
 import { RunStore } from "../src/store.js";
 import type { GraphDefinition } from "../src/types.js";
 
@@ -111,6 +112,51 @@ test("advisor invocation identities remain unique after reopening a run", async 
     assert.match(firstEvidence, /advice-1/);
     assert.match(await readFile(join(resumedStore.runDirectory, firstObservation.evidenceFile), "utf8"), /advice-1/);
     assert.match(await readFile(join(resumedStore.runDirectory, secondObservation.evidenceFile), "utf8"), /advice-2/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("advisor ownership escape after an ordinary error blocks the dependent wave", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-advisor-error-ownership-"));
+  await exec("git", ["init", "--quiet"], { cwd: root });
+  await writeFile(join(root, "README.md"), "fixture\n", "utf8");
+  const graph: GraphDefinition = {
+    version: 1,
+    run: {
+      id: "advisor-error-ownership",
+      objective: "Fail closed when an advisor changes files and then errors",
+      repository: ".",
+      maxConcurrency: 1,
+      advisor: { executor: "codex", stopOnBlocker: false },
+    },
+    nodes: [
+      { id: "first", type: "verify", needs: [], owns: [], checks: [], maxAttempts: 1 },
+      { id: "next", type: "verify", needs: ["first"], owns: [], checks: [], maxAttempts: 1 },
+    ],
+  };
+  const adapter: AgentAdapter = {
+    async execute() {
+      await writeFile(join(root, "outside-owner.txt"), "partial advisor write\n", "utf8");
+      throw new Error("provider disconnected after writing");
+    },
+  };
+
+  try {
+    const state = await new GraphRunner(graph, root, { codex: adapter }).run();
+
+    assert.equal(state.status, "needs_attention");
+    assert.equal(state.nodes.next!.attempts, 0, "the dependent wave must not start after an ownership blocker");
+    const blocker = state.advisor?.blocker;
+    assert.equal(blocker?.severity, "blocker");
+    assert.match(blocker?.summary ?? "", /advisor changed paths outside \.agent-graph/);
+    const evidence = JSON.parse(
+      await readFile(join(root, ".agent-graph", "runs", graph.run.id, "evidence", "advisor-wave-1.json"), "utf8"),
+    ) as { blocker?: boolean; ownership?: { escapedPaths?: string[] }; failures?: string[] };
+    assert.equal(evidence.blocker, true);
+    assert.deepEqual(evidence.ownership?.escapedPaths, ["outside-owner.txt"]);
+    assert.match(evidence.failures?.join("; ") ?? "", /provider disconnected after writing/);
+    assert.match(evidence.failures?.join("; ") ?? "", /outside-owner\.txt/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { open, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { open, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -70,6 +70,47 @@ test("an abandoned partial recovery guard can be force-recovered", async () => {
     assert.equal(await recoverRunLock(root, "abandoned-guard", true), undefined);
     const lock = await acquireRunLock(root, "abandoned-guard");
     await lock.release();
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("acquisition recovers a demonstrably stale local recovery guard", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agr-lock-stale-guard-"));
+  const runRoot = join(root, ".agent-graph", "runs", "stale-guard");
+  const recoveryPath = join(runRoot, ".run.lock.recovery");
+  try {
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(runRoot, { recursive: true }));
+    await writeFile(recoveryPath, JSON.stringify({
+      token: "dead-recovery-owner", pid: 2147483647, host: hostname(), startedAt: "2000-01-01T00:00:00.000Z",
+    }));
+
+    const acquired = await acquireRunLock(root, "stale-guard");
+    assert.equal(acquired.record.host, hostname());
+    await assert.rejects(readFile(recoveryPath), { code: "ENOENT" });
+    await acquired.release();
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("acquisition preserves live, foreign, and unreadable recovery guards", async () => {
+  const guards = [
+    { id: "live-guard", bytes: JSON.stringify({ token: "live", pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }) },
+    { id: "foreign-guard", bytes: JSON.stringify({ token: "foreign", pid: 1, host: "another-host", startedAt: "2000-01-01T00:00:00.000Z" }) },
+    { id: "unknown-guard", bytes: "" },
+  ];
+  const root = await mkdtemp(join(tmpdir(), "agr-lock-preserve-guard-"));
+  try {
+    for (const guard of guards) {
+      const runRoot = join(root, ".agent-graph", "runs", guard.id);
+      const recoveryPath = join(runRoot, ".run.lock.recovery");
+      await import("node:fs/promises").then(({ mkdir }) => mkdir(runRoot, { recursive: true }));
+      await writeFile(recoveryPath, guard.bytes);
+
+      await assert.rejects(acquireRunLock(root, guard.id), /could not acquire run lock/);
+      assert.equal(await readFile(recoveryPath, "utf8"), guard.bytes);
+    }
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }

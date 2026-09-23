@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { createInitialState } from "./state.js";
 import { graphHash } from "./graph-hash.js";
 import { RunLifecycle } from "./lifecycle.js";
+import { assertSafeArtifactId, runArtifactDirectory } from "./artifact-path.js";
+import { parseRunEventLog } from "./observation.js";
 import type { GraphDefinition, RunEvent, RunState } from "./types.js";
 
 export class RunStore {
@@ -20,8 +22,10 @@ export class RunStore {
     readonly graph: GraphDefinition,
     public state: RunState,
     private nextEventSeq: number,
+    private readonly eventLogUsesSequences: boolean,
+    private eventLogNeedsSeparator: boolean,
   ) {
-    this.runDirectory = join(repositoryRoot, ".agent-graph", "runs", graph.run.id);
+    this.runDirectory = runArtifactDirectory(repositoryRoot, graph.run.id);
     this.statePath = join(this.runDirectory, "state.json");
     this.eventsPath = join(this.runDirectory, "events.jsonl");
     this.evidenceDirectory = join(this.runDirectory, "evidence");
@@ -34,7 +38,8 @@ export class RunStore {
     graph: GraphDefinition,
     baselineChangedFiles: string[],
   ): Promise<RunStore> {
-    const runDirectory = join(repositoryRoot, ".agent-graph", "runs", graph.run.id);
+    const runDirectory = runArtifactDirectory(repositoryRoot, graph.run.id);
+    for (const node of graph.nodes) assertSafeArtifactId(node.id, "node ID");
     await mkdir(join(runDirectory, "evidence"), { recursive: true });
     await mkdir(join(runDirectory, "outputs"), { recursive: true });
     await mkdir(join(runDirectory, "prompts"), { recursive: true });
@@ -59,11 +64,14 @@ export class RunStore {
 
     if (await applyAttemptHighWater(state, graph, runDirectory)) stateNeedsNormalization = true;
 
+    const eventLogCursor = await readEventLogCursor(join(runDirectory, "events.jsonl"));
     const store = new RunStore(
       repositoryRoot,
       graph,
       state,
-      await readNextEventSequence(join(runDirectory, "events.jsonl")),
+      eventLogCursor.nextSequence,
+      eventLogCursor.usesSequences,
+      eventLogCursor.needsSeparator,
     );
     const recoveryEvents = new RunLifecycle(graph, store.state).recoverInterruptedNodes();
     for (const event of recoveryEvents) {
@@ -89,11 +97,12 @@ export class RunStore {
   async appendEvent(event: Omit<RunEvent, "seq">): Promise<RunEvent> {
     const persisted = { seq: this.nextEventSeq, ...event };
     this.nextEventSeq += 1;
-    const write = this.eventWriteQueue.then(() => appendFile(
-      this.eventsPath,
-      `${JSON.stringify(persisted)}\n`,
-      "utf8",
-    ));
+    const record = this.eventLogUsesSequences ? persisted : event;
+    const write = this.eventWriteQueue.then(async () => {
+      const separator = this.eventLogNeedsSeparator ? "\n" : "";
+      await appendFile(this.eventsPath, `${separator}${JSON.stringify(record)}\n`, "utf8");
+      this.eventLogNeedsSeparator = false;
+    });
     this.eventWriteQueue = write.catch(() => undefined);
     await write;
     return persisted;
@@ -116,12 +125,24 @@ export async function writeImmutableArtifact(path: string, content: string): Pro
   }
 }
 
-async function readNextEventSequence(path: string): Promise<number> {
+async function readEventLogCursor(path: string): Promise<{
+  nextSequence: number;
+  usesSequences: boolean;
+  needsSeparator: boolean;
+}> {
   try {
     const raw = await readFile(path, "utf8");
-    return raw.split(/\r?\n/).filter(Boolean).length + 1;
+    const events = parseRunEventLog(raw);
+    const needsSeparator = raw.length > 0 && !raw.endsWith("\n");
+    if (events.length === 0) return { nextSequence: 1, usesSequences: true, needsSeparator };
+    const firstRecord = JSON.parse(raw.split(/\r?\n/).find((line) => line.trim())!) as Record<string, unknown>;
+    const usesSequences = Object.hasOwn(firstRecord, "seq");
+    const nextSequence = usesSequences ? events.at(-1)!.seq + 1 : events.length + 1;
+    return { nextSequence, usesSequences, needsSeparator };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 1;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { nextSequence: 1, usesSequences: true, needsSeparator: false };
+    }
     throw error;
   }
 }

@@ -122,7 +122,10 @@ never substitutes for ownership, checks, evidence, or human authority.
 
 - **AC29 Ordered durable events:** Persisted safe run events have a monotonically
   increasing `seq` cursor. Existing pre-cursor event logs remain readable by
-  assigning line-order cursors in memory. Lifecycle transitions, safe provider
+  assigning line-order cursors in memory. Resuming a legacy run keeps its
+  append-only log in legacy format; new entries receive line-order cursors when
+  read, without rewriting historical evidence or mixing cursor formats.
+  Lifecycle transitions, safe provider
   activity, node milestones, advisor observations, and terminal outcomes are
   durable; raw model text, tool arguments, commands, prompts, and reasoning are
   excluded. A state snapshot remains the recovery source; the event stream is
@@ -132,7 +135,10 @@ never substitutes for ownership, checks, evidence, or human authority.
   is active, emits bounded synthetic heartbeat observations when no durable
   event arrives, and exits only when the run is terminal or needs operator
   action. JSONL emits one valid object per line and can resume without replaying
-  events at or before `N`.
+  events at or before `N`. A nonterminal run with a demonstrably missing or
+  stale local owner fails with `RUN_OWNER_MISSING` and recovery guidance rather
+  than emitting heartbeats indefinitely. Foreign or initializing ownership is
+  not treated as proof that the owner has stopped.
 - **AC31 Wait:** `agr wait [graph] [--after N] [--timeout-ms N] [--json]`
   waits for a new durable event or a status that no longer runs, then returns a
   bounded batch containing `status`, `terminal`, `timedOut`, `cursor`, events,
@@ -143,7 +149,11 @@ never substitutes for ownership, checks, evidence, or human authority.
   metadata, and cursor. `agr why [graph]` returns structured issue codes,
   retry-safety, affected nodes/paths when known, and exact non-destructive next
   actions derived from runtime state/evidence rather than free-form handoff
-  claims. Both commands are read-only and support `--json`.
+  claims. Both commands are read-only and support `--json`. Milestones belong
+  only to the current attempt. A durable `node_execution_finished` event removes
+  an executor from active execution summaries while final wave acceptance remains
+  pending; it never accepts the node. Exhausted attempt budgets require an explicit
+  `agr retry <node>` before resuming, and recovery advice must say so.
 - **AC33 Passive advisor role:** A run may declare one optional advisor with an
   explicit Codex, Claude, or Claudex executor and optional model/instructions.
   After each completed wave and before another wave starts, AGR dispatches one
@@ -154,7 +164,9 @@ never substitutes for ownership, checks, evidence, or human authority.
   as clearly non-authoritative context into later node prompts.
 - **AC34 Advisor safety and recovery:** Advisor configuration is visible in
   validation/plan/doctor and never grants ownership. Ordinary advisor failure
-  emits `advisor_failed` and execution continues. An advisor write outside
+  emits `advisor_failed` and execution continues only after ownership is checked.
+  Ownership is inspected even when the advisor throws or returns invalid output.
+  An advisor write outside
   `.agent-graph/**`, an unconfirmed advisor process-tree termination, or an
   advisor `blocker` when `stopOnBlocker` is not false stops before the next wave
   as `needs_attention`. `agr advisor acknowledge [graph]` is the only operation
@@ -322,7 +334,10 @@ Traceable test plan:
 
 - **AC1 Graph validity:** Duplicate node IDs, missing dependencies, cycles,
   invalid executors/types, and ownership conflicts among nodes that could be
-  ready together are rejected before any executor starts.
+  ready together are rejected before any executor starts. Run and node IDs must
+  be safe cross-platform filename components (see the graph-format reference);
+  path traversal and reserved path names are rejected before artifact creation.
+  `agent`/`review` nodes require an agent executor, never `shell`.
 - **AC2 Readiness:** A node starts only after all dependencies are accepted.
   Ready nodes with non-overlapping ownership may run concurrently up to the
   configured limit.
@@ -341,7 +356,8 @@ Traceable test plan:
   them automatically.
 - **AC6 Deterministic verification:** Every configured check runs directly in
   the repository. A nonzero exit fails the attempt. Captured command, exit code,
-  and bounded output are written as evidence.
+  and bounded output are written as evidence. Unconfirmed process-tree cleanup
+  stops the remaining checks; no later command may overlap a possible survivor.
 - **AC7 Recovery:** Re-running `agr run` after process interruption reconstructs
   state from disk. Ordinary nodes left `running` become `ready` with an
   interrupted attempt event; an `external_action` left running becomes failed
@@ -355,7 +371,10 @@ Traceable test plan:
 - **AC9 Human authority:** `human_gate` and `external_action` nodes never run on
   model authority. Approval is scoped to one node and exact target. External
   actions are disabled unless the graph opts in and the gate was explicitly
-  approved through `agr approve`.
+  approved through `agr approve`. After external execution starts, any failed
+  acceptance, including missing model-usage evidence, blocks automatic retry.
+  Inspect partial effects before an explicit retry; an existing gate is not
+  authority to repeat an uncertain effect automatically.
 - **AC10 Context:** When requested, the runtime asks the locally installed
   CodeGraph for status, symbol search, impact, and affected tests. Missing or
   stale/unavailable CodeGraph produces a labeled fallback, not fabricated
@@ -401,6 +420,9 @@ Traceable test plan:
   terminal within a bounded interval so neither the helper nor an automatic retry
   can overlap a possible survivor. Cleanup of temporary process input can never
   preempt tracking of an already spawned executor or mask a terminal outcome.
+  A provider closing piped stdin before consuming the prompt is handled as an
+  executor failure, with diagnostics and cleanup, rather than an uncaught stream
+  error terminating AGR.
 - **AC16 Required model usage:** A Claudex node may declare
   `requiredModelUsage` entries containing a model identity, provider, and
   context window. The adapter retains Claudex's structured `modelUsage`, the

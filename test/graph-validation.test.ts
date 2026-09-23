@@ -105,6 +105,31 @@ test("validate rejects schema-invalid field types without throwing", () => {
   assert.deepEqual(result.topologicalOrder, []);
 });
 
+test("validate rejects artifact IDs that cannot safely name storage paths", () => {
+  const graph = baseGraph();
+  graph.run.id = "../escape";
+  graph.nodes[0]!.id = "source/child";
+
+  const errors = validateGraph(graph).errors.join("\n");
+  assert.match(errors, /run\.id must be a safe artifact identifier/);
+  assert.match(errors, /node at index 0 id must be a safe artifact identifier/);
+
+  graph.run.id = "job search_日本";
+  graph.nodes[0]!.id = "source child_日本";
+  graph.nodes[1]!.needs = ["source child_日本"];
+  assert.deepEqual(validateGraph(graph).errors, []);
+});
+
+test("validate rejects shell executors for agent and review nodes", () => {
+  for (const type of ["agent", "review"] as const) {
+    const graph = baseGraph();
+    graph.nodes[0]!.type = type;
+    graph.nodes[0]!.executor = "shell";
+
+    assert.match(validateGraph(graph).errors.join("\n"), /require an executor that produces a handoff/);
+  }
+});
+
 test("validate rejects invalid optional field types on every node type", () => {
   const graph = baseGraph();
   const verify = graph.nodes[0]!;

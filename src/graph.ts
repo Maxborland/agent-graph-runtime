@@ -4,6 +4,7 @@ import type {
   GraphValidationResult,
 } from "./types.js";
 import { executorNames, reasoningEfforts } from "./types.js";
+import { isSafeArtifactId } from "./artifact-path.js";
 
 const nodeTypes = new Set([
   "agent",
@@ -43,6 +44,7 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
   }
   if (graph.version !== 1) errors.push("version must be 1");
   if (typeof graph.run.id !== "string" || !graph.run.id.trim()) errors.push("run.id is required");
+  else if (!isSafeArtifactId(graph.run.id)) errors.push("run.id must be a safe artifact identifier");
   if (typeof graph.run.objective !== "string" || !graph.run.objective.trim()) errors.push("run.objective is required");
   if (typeof graph.run.repository !== "string" || !graph.run.repository.trim()) errors.push("run.repository is required");
   if (!Number.isInteger(graph.run?.maxConcurrency) || graph.run.maxConcurrency < 1) {
@@ -110,6 +112,9 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
       dependencyShapeValid = false;
       continue;
     }
+    if (!isSafeArtifactId(node.id)) {
+      errors.push(`node at index ${index} id must be a safe artifact identifier`);
+    }
     if (byId.has(node.id)) errors.push(`duplicate node id "${node.id}"`);
     byId.set(node.id, node);
     if (!nodeTypes.has(node.type)) errors.push(`node "${node.id}" has invalid type`);
@@ -124,6 +129,9 @@ export function validateGraph(graph: GraphDefinition): GraphValidationResult {
     }
     if (["agent", "review"].includes(node.type) && !node.executor) {
       errors.push(`node "${node.id}" requires an executor`);
+    }
+    if (["agent", "review"].includes(node.type) && node.executor === "shell") {
+      errors.push(`node "${node.id}" agent and review types require an executor that produces a handoff`);
     }
     if (["agent", "review"].includes(node.type) && (typeof node.prompt !== "string" || !node.prompt.trim())) {
       errors.push(`node "${node.id}" requires a prompt`);

@@ -6,6 +6,7 @@ import { basename, dirname, delimiter, extname, join, relative, resolve } from "
 import { promisify } from "node:util";
 
 import { validateGraph } from "./graph.js";
+import { artifactIdPattern, isSafeArtifactId, runArtifactDirectory } from "./artifact-path.js";
 import { astraLunaNodes } from "./astra-luna-template.js";
 import { CliError } from "./cli-error.js";
 import { resolveSpawnCommand } from "./adapters.js";
@@ -31,7 +32,7 @@ export const graphSchema = {
       additionalProperties: false,
       required: ["id", "objective", "repository", "maxConcurrency"],
       properties: {
-        id: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1, pattern: artifactIdPattern },
         objective: { type: "string", minLength: 1 },
         repository: { type: "string", minLength: 1 },
         maxConcurrency: { type: "integer", minimum: 1 },
@@ -69,7 +70,7 @@ export const graphSchema = {
         additionalProperties: false,
         required: ["id", "type", "needs", "owns", "checks", "maxAttempts"],
         properties: {
-          id: { type: "string", minLength: 1 },
+          id: { type: "string", minLength: 1, pattern: artifactIdPattern },
           type: { enum: ["agent", "verify", "review", "human_gate", "external_action"] },
           executor: { enum: ["codex", "claude", "claudex", "shell"] },
           prompt: { type: "string" },
@@ -107,6 +108,16 @@ export const graphSchema = {
           },
         },
         allOf: [
+          {
+            if: {
+              properties: {
+                type: { enum: ["agent", "review"] },
+                executor: { const: "shell" },
+              },
+              required: ["type", "executor"],
+            },
+            then: false,
+          },
           {
             if: { properties: { type: { enum: ["agent", "review"] } }, required: ["type"] },
             then: { required: ["executor", "prompt"] },
@@ -200,7 +211,7 @@ export async function listRuns(repositoryRoot: string): Promise<RunState[]> {
     throw error;
   }
   const states: RunState[] = [];
-  for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && isSafeArtifactId(candidate.name))) {
     try {
       states.push(await readRunState(repositoryRoot, entry.name));
     } catch (error) {
@@ -323,7 +334,7 @@ export async function diagnoseEnvironment(
 }
 
 export function runDirectory(repositoryRoot: string, runId: string): string {
-  return join(repositoryRoot, ".agent-graph", "runs", runId);
+  return runArtifactDirectory(repositoryRoot, runId);
 }
 
 async function findOnPath(command: string): Promise<string | undefined> {

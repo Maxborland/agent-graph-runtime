@@ -98,7 +98,9 @@ export class PassiveAdvisor {
       return;
     }
     const pendingActivity = new Set<Promise<unknown>>();
-    let result: AdapterResult;
+    let result: AdapterResult | undefined;
+    let executionFailed = false;
+    let executionError: unknown;
     try {
       result = await adapter.execute({
         node,
@@ -117,32 +119,50 @@ export class PassiveAdvisor {
         },
       });
     } catch (error) {
-      await Promise.allSettled([...pendingActivity]);
-      await this.recordFailure(
-        store,
-        advisorId,
-        wave,
-        messageOf(error),
-        error instanceof NonRetryableAdapterError || error instanceof ExecutionEvidenceMismatchError,
-        error instanceof ExecutionEvidenceMismatchError
-          ? { configuredExecution: error.configuredExecution, observedExecution: error.observedExecution }
-          : undefined,
-      );
-      return;
+      executionFailed = true;
+      executionError = error;
     }
     await Promise.allSettled([...pendingActivity]);
     let escapedPaths: string[];
+    let ownershipInspectionFailure: string | undefined;
     try {
       escapedPaths = await findUnexpectedChanges(this.repositoryRoot, baseline, [".agent-graph/**"], this.options.signal);
     } catch (error) {
-      escapedPaths = [`<advisor ownership inspection failed: ${messageOf(error)}>`];
+      escapedPaths = [];
+      ownershipInspectionFailure = messageOf(error);
     }
     const safetyFailures = [
-      ...(result.handoff.changedFiles.length > 0
+      ...(ownershipInspectionFailure === undefined
+        ? []
+        : [`advisor ownership inspection failed: ${ownershipInspectionFailure}`]),
+      ...(result && result.handoff.changedFiles.length > 0
         ? [`advisor claimed changed paths: ${result.handoff.changedFiles.join(", ")}`]
         : []),
       ...(escapedPaths.length > 0 ? [`advisor changed paths outside .agent-graph/**: ${escapedPaths.join(", ")}`] : []),
     ];
+    if (executionFailed || !result) {
+      const detail = executionFailed
+        ? messageOf(executionError)
+        : "advisor execution returned no result";
+      await this.recordFailure(
+        store,
+        advisorId,
+        wave,
+        detail,
+        safetyFailures.length > 0 || executionError instanceof NonRetryableAdapterError ||
+          executionError instanceof ExecutionEvidenceMismatchError,
+        executionError instanceof ExecutionEvidenceMismatchError
+          ? { configuredExecution: executionError.configuredExecution, observedExecution: executionError.observedExecution }
+          : undefined,
+        {
+          escapedPaths,
+          failures: safetyFailures,
+          ...(ownershipInspectionFailure === undefined ? {} : { ownershipInspectionFailure }),
+          observationSummary: [detail, ...safetyFailures].join("; "),
+        },
+      );
+      return;
+    }
     const severity = safetyFailures.length > 0
       ? "blocker"
       : result.handoff.status === "blocked"
@@ -160,7 +180,7 @@ export class PassiveAdvisor {
       severity,
       handoff: result.handoff,
       modelUsage: result.modelUsage ?? null,
-      ownership: { declared: [], escapedPaths },
+      ownership: { declared: [], escapedPaths, ...(ownershipInspectionFailure === undefined ? {} : { inspectionFailure: ownershipInspectionFailure }) },
       failures: safetyFailures,
     }, null, 2)}\n`, "utf8");
     const observation: AdvisorObservation = {
@@ -202,6 +222,12 @@ export class PassiveAdvisor {
       configuredExecution: AdapterResult["configuredExecution"];
       observedExecution: AdapterResult["observedExecution"];
     },
+    inspection?: {
+      escapedPaths: string[];
+      failures: string[];
+      ownershipInspectionFailure?: string;
+      observationSummary?: string;
+    },
   ): Promise<void> {
     const evidencePath = join(store.evidenceDirectory, `advisor-wave-${wave}.json`);
     await writeFile(evidencePath, `${JSON.stringify({
@@ -213,7 +239,14 @@ export class PassiveAdvisor {
             configuredExecution: execution.configuredExecution ?? null,
             observedExecution: execution.observedExecution ?? null,
           }),
-      failures: [detail],
+      failures: [detail, ...(inspection?.failures ?? [])],
+      ownership: {
+        declared: [],
+        escapedPaths: inspection?.escapedPaths ?? [],
+        ...(inspection?.ownershipInspectionFailure === undefined
+          ? {}
+          : { inspectionFailure: inspection.ownershipInspectionFailure }),
+      },
       blocker,
     }, null, 2)}\n`, "utf8");
     const at = new Date().toISOString();
@@ -234,7 +267,7 @@ export class PassiveAdvisor {
         wave,
         at,
         severity: "blocker",
-        summary: detail.slice(0, 1_000),
+        summary: (inspection?.observationSummary ?? detail).slice(0, 1_000),
         evidenceFile: relative(store.runDirectory, evidencePath).replaceAll("\\", "/"),
       };
       store.state.advisor ??= {};
