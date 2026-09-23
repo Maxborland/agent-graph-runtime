@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { CliError } from "./cli-error.js";
 import { runArtifactDirectory } from "./artifact-path.js";
-import { inspectRunLock } from "./run-lock.js";
+import { inspectRunLock, inspectRunRecoveryGuard } from "./run-lock.js";
 import type { GraphDefinition, RunEvent, RunState } from "./types.js";
 
 export interface RunObservationSnapshot {
@@ -271,13 +271,11 @@ export class RunObserver {
       }
       if (snapshot.events.length === 100) continue;
       if (snapshot.terminal) {
-        const owner = await inspectRunLock(this.repositoryRoot, this.runId);
-        if (terminalEventObserved || !["live", "foreign", "initializing"].includes(owner.status)) return;
+        if (terminalEventObserved || !(await this.hasOwner())) return;
         await delay(intervalMs);
         continue;
       }
-      const owner = await inspectRunLock(this.repositoryRoot, this.runId);
-      if (!["live", "foreign", "initializing"].includes(owner.status)) {
+      if (!(await this.hasOwner())) {
         if ((await this.read(cursor, 100)).terminal) continue;
         throw missingRunOwner(this.runId);
       }
@@ -292,6 +290,20 @@ export class RunObserver {
       }
       await delay(intervalMs);
     }
+  }
+
+  private async hasOwner(): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const owner = await inspectRunLock(this.repositoryRoot, this.runId);
+      if (["live", "foreign", "initializing"].includes(owner.status)) return true;
+      const recovery = await inspectRunRecoveryGuard(this.repositoryRoot, this.runId);
+      if (["live", "foreign", "initializing"].includes(recovery.status)) return true;
+      // The owner and recovery guard are read separately. Recheck if their
+      // handoff happened between those reads. A dead local recovery guard does
+      // not keep follow alive.
+      if (attempt === 0) await delay(100);
+    }
+    return false;
   }
 }
 

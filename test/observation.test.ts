@@ -375,6 +375,55 @@ test("follow treats an initializing owner record as a startup race", async () =>
   }
 });
 
+for (const recoveryStatus of ["live", "foreign", "initializing", "stale", "missing"] as const) {
+  test(`follow handles a ${recoveryStatus} recovery guard while the run lock is absent`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "agr-observation-recovery-"));
+    const runRoot = join(root, ".agent-graph", "runs", "recovering");
+    await mkdir(runRoot, { recursive: true });
+    const state: RunState = {
+      runId: "recovering", graphHash: "fixture", status: "running",
+      createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:01.000Z",
+      baselineChangedFiles: [], nodes: {},
+    };
+    const guardPath = join(runRoot, ".run.lock.recovery");
+    const lockPath = join(runRoot, ".run.lock");
+    const liveRecord = JSON.stringify({ token: "recovering-owner", pid: process.pid, host: hostname(), startedAt: state.createdAt });
+    await writeFile(join(runRoot, "state.json"), JSON.stringify(state));
+    await writeFile(join(runRoot, "events.jsonl"), "");
+    if (recoveryStatus !== "missing") {
+      await writeFile(guardPath, recoveryStatus === "initializing" ? "{" : JSON.stringify({
+        token: "recovery", pid: recoveryStatus === "stale" ? findMissingLocalPid() : process.pid,
+        host: recoveryStatus === "foreign" ? `${hostname()}-other` : hostname(), startedAt: state.createdAt,
+      }));
+    }
+    const follower = new RunObserver(root, "recovering").follow(0, 1);
+    try {
+      if (recoveryStatus === "stale" || recoveryStatus === "missing") {
+        await assert.rejects(follower.next(), { code: "RUN_OWNER_MISSING" });
+      } else {
+        assert.equal((await follower.next()).value?.type, "observer_heartbeat");
+        // A recovering owner may take longer than the missing-owner grace.
+        // Its guard must keep observation alive until replacement is complete.
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        assert.equal((await follower.next()).value?.type, "observer_heartbeat");
+        await writeFile(lockPath, liveRecord);
+        await rm(guardPath);
+        const next = await follower.next();
+        assert.equal(next.value?.type, "observer_heartbeat");
+        state.status = "completed";
+        await writeFile(join(runRoot, "state.json"), JSON.stringify(state));
+        await writeFile(join(runRoot, "events.jsonl"), `${JSON.stringify({ seq: 1, at: state.updatedAt, type: "run_completed" })}\n`);
+        await rm(lockPath);
+        assert.equal((await follower.next()).value?.type, "run_completed");
+        assert.equal((await follower.next()).done, true);
+      }
+    } finally {
+      await follower.return(undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("observation follow replays through the terminal event without duplicates", async () => {
   const root = await mkdtemp(join(tmpdir(), "agr-observation-follow-"));
   const runRoot = join(root, ".agent-graph", "runs", "followed");

@@ -36,20 +36,8 @@ export async function acquireRunLock(repositoryRoot: string, runId: string): Pro
       await delay(25);
       continue;
     }
-    const record: LockRecord = {
-      token: randomUUID(),
-      pid: process.pid,
-      host: hostname(),
-      startedAt: new Date().toISOString(),
-    };
     try {
-      const handle = await open(path, "wx");
-      try {
-        await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
-      } finally {
-        await handle.close();
-      }
-      const lock = createOwnedLock(path, record);
+      const lock = await writeOwnedLock(path);
       if (await exists(recoveryPath)) {
         await lock.release();
         await delay(25);
@@ -60,8 +48,8 @@ export async function acquireRunLock(repositoryRoot: string, runId: string): Pro
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const inspection = await inspectRunLock(repositoryRoot, runId);
       if (inspection.status === "stale") {
-        await recoverRunLock(repositoryRoot, runId, false);
-        continue;
+        // Retain the recovery owner until its replacement is observable.
+        return recoverRunLockWith(repositoryRoot, runId, false, () => writeOwnedLock(path));
       }
       const owner = inspection.record;
       const detail = owner
@@ -79,6 +67,17 @@ export async function inspectRunLock(
   runId: string,
 ): Promise<RunLockInspection> {
   const path = join(runArtifactDirectory(repositoryRoot, runId), ".run.lock");
+  return inspectLockPath(path);
+}
+
+export async function inspectRunRecoveryGuard(
+  repositoryRoot: string,
+  runId: string,
+): Promise<RunLockInspection> {
+  return inspectLockPath(join(runArtifactDirectory(repositoryRoot, runId), ".run.lock.recovery"));
+}
+
+async function inspectLockPath(path: string): Promise<RunLockInspection> {
   if (!(await exists(path))) return { status: "missing" };
   const record = await readLock(path);
   if (!record) return { status: "initializing" };
@@ -91,6 +90,15 @@ export async function recoverRunLock(
   runId: string,
   force: boolean,
 ): Promise<LockRecord | undefined> {
+  return recoverRunLockWith(repositoryRoot, runId, force, async (record) => record);
+}
+
+async function recoverRunLockWith<T>(
+  repositoryRoot: string,
+  runId: string,
+  force: boolean,
+  afterRemoval: (record: LockRecord | undefined) => Promise<T>,
+): Promise<T> {
   const path = join(runArtifactDirectory(repositoryRoot, runId), ".run.lock");
   const recoveryPath = `${path}.recovery`;
   const recovery = await acquireRecoveryGuard(recoveryPath, runId, force);
@@ -100,7 +108,7 @@ export async function recoverRunLock(
     if (!inspection.record) {
       if (inspection.status === "initializing" && force) {
         await rm(path, { force: true });
-        return undefined;
+        return await afterRemoval(undefined);
       }
       const recoveryHint = inspection.status === "initializing"
         ? "; if its owner is confirmed stopped, repeat with --force"
@@ -118,10 +126,23 @@ export async function recoverRunLock(
       );
     }
     await rm(path, { force: true });
-    return inspection.record;
+    return await afterRemoval(inspection.record);
   } finally {
     await recovery.release();
   }
+}
+
+async function writeOwnedLock(path: string): Promise<RunLock> {
+  const record: LockRecord = {
+    token: randomUUID(), pid: process.pid, host: hostname(), startedAt: new Date().toISOString(),
+  };
+  const handle = await open(path, "wx");
+  try {
+    await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, "utf8");
+  } finally {
+    await handle.close();
+  }
+  return createOwnedLock(path, record);
 }
 
 async function releaseStaleLocalRecoveryGuard(path: string): Promise<void> {
